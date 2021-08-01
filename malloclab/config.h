@@ -12,6 +12,8 @@
  * This is the default path where the driver will look for the
  * default tracefiles. You can override it at runtime with the -t flag.
  */
+ 
+ /* AN: changed the directory to the local one. */
 #define TRACEDIR "traces/"
 // /afs/cs/project/ics2/im/labs/malloclab/traces/
 
