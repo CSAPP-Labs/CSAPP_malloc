@@ -9,7 +9,23 @@
  * NOTE TO STUDENTS: Replace this header comment with your own header
  * comment that gives a high level description of your solution.
  * 
- * Description of solution:
+ *
+ * (AN): Description of implementation
+ *
+ * Provided with the lab is the memlib module which models a virtual
+ * memory of MAX_HEAP ~20MB. The mdriver initializes this VM model by 
+ * calling the mem_init() from the provided module. Within this model,
+ * the student implementation (below) is initialized via mm_init. The 
+ * core implementations of mm_malloc, mm_free, and mm_realloc are then
+ * called by the driver on the traces provided with this lab.
+ *
+ * 
+ * The memlib module maintains the start of the heap in the model, the 
+ * current boundary of the used heap (mem_brk) and the maximum size of 
+ * the heap, mem_max_addr. Extending the heap beyond that is illegal.
+ * 
+ * The core student implementations use macros from mm_macros.c. 
+ * mm_init() initializes the heap with CHUNKSIZE.  
  *
  */
 #include <stdio.h>
@@ -49,7 +65,8 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-
+/* always points at prologue block of heap */
+static void *heap_listp; // = mem_heap_lo();
 
 
 /* 
@@ -57,6 +74,22 @@ team_t team = {
  */
 int mm_init(void)
 {
+	/* initial empty heap */
+	if ( (heap_listp = mem_sbrk(2*DSIZE))== (void *)-1)
+		return -1;
+
+	/* alignment; prologue hdr; prologue ftr; epilogue hdr */
+	PUT(heap_listp, 0);
+	PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));
+	PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));
+	PUT(heap_listp + (3*WSIZE), PACK(0, 1));
+	heap_listp+=DSIZE; // points right after prologue block?
+
+
+	/* extend heap with a free block of CHUNKSIZE */
+	if (extend_heap(CHUNKSIZE) == NULL)
+		return -1;
+
     return 0;
 }
 
@@ -105,11 +138,34 @@ void *mm_realloc(void *ptr, size_t size)
 
 
 /* 
- * helper functions: placement, find fits, 
+ * helper functions: placement, find fits, heap checker
  *
  */
 
+/* heap checker - where to call, what to report? 
+ *
+ * is every block in free list marked as free?
+ * any contiguous free blocks that escaped coalescing?
+ * is every free block actually in the free list?
+ * do the pointers in the free list point to free blocks?
+ * do any allocated blocks overlap?
+ * do the pointers in a heap block point to valid heap addresses?
+ */
+int mm_check(void)
+{
 
+
+
+	return 1; // HEAP OK
+
+}
+
+static void *extend_heap (size_t words)
+{
+
+
+
+}
 
 
 
