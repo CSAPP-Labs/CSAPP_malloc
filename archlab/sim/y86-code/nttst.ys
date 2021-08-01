@@ -1,0 +1,130 @@
+# PIPE implementation test of the not-taken cond.jmp. case.
+## Side-note: stack maintenance not followed. This means the code 
+## can't safely be embedded in other programs.
+
+### Test design:
+# Signs of a passed test:
+## Signs of good jmp
+## Signs of good call
+## Signs of good conditional not-taken
+## Signs of good conditional taken
+
+# Events which should never occur:
+## Marked by certain instructions, values, registers
+
+### Test code during debugging:
+# Debugging done in GUI version.
+
+# Issue: jmp was wrongly predicted as not taken.
+# Mistake. UNCOND is f_ifun, not f_icond. Through that it must
+# be distinguished from other IJXX in predPC. OK
+
+# Issue: pipe control inserts bubbles after an unconditional jump, 
+# cancelling D, E stage instructions.
+# Fix: don't inject anything in case of uncond jmp. OK
+
+# Issue: 2-cycle "stalling" in F, but afterwards executes normally. 
+# When uncond jmp reaches E stage, the step into M results in a 
+# repeat of the fetch stage. 
+# e_valA (carrying valC) is incremented and erroneously fed into
+# the M_valA which is fed into F stage.. twice? 
+# M_valA should not be selected, but valP, which is in predPC.
+
+# Worked under the assumption that M_ifun pipe reg doesn't exist
+# because of the simguide graphic. And thus, the attempt to select
+# the proper next-address via selection logic failed because the 
+# "stalling" occurred as the uncond jmp went from E to M stage. 
+# Hence, it should be specified that the forwarded M_valA is NOT
+# selected in the case where uncond jmp enters M. OK
+
+# M_ifun==UNCOND simply checks if ifun is 0; but it is not 0 only 
+# with uncond jmp, but also with many mov, call, ret, instructions. 
+# So in this check, specify:
+# "it is not the case that uncond jmp is entering M stage" 
+
+# jg Pos1 was correctly predicted as not taken;
+# instructions after were then correctly executed.
+ 
+# call dummy was correctly predicted as taken.
+
+# jg Pos2 was correctly predicted as not taken; 
+# instructions were then correctly cancelled.
+
+# rax was correctly set to 6.
+
+### Testing tools:
+## The psim initially failed two thirds of regression jtests.
+## After fixing the pipe-nt to satisfy nttst.ys, and the benchmark
+## testpsim, psim for the not-taken implementation passes all
+## regression tests.
+## Passes benchmark tests in y86-code, compared with YIS.
+## Final check comparing test code on psim and on YIS. Passed.
+
+
+#### Code here. Execution begins at address 0. ####
+	.pos 0 
+	irmovq stack, %rsp  	# Set up stack pointer  
+	call main		# Execute main program
+	halt			# Terminate program 
+
+# main program
+main:	call nttst		# nttst()
+	ret 
+	
+/* $begin jump-not-taken test */
+
+# long dummy()
+	.pos 0x100
+dummy:	irmovq $4, %rax
+	nop
+	nop
+	ret
+
+# long nttst()
+nttst:	
+	xorq %rax, %rax	# rax = 0
+	xorq %rdx, %rdx	# rdx = 0
+	
+	jmp Jump0
+	irmovq $33, %r10	# never executed, never in pipeline
+	irmovq $33, %r10	# never executed, never in pipeline	
+Jump0:	nop			# should be passed through without F_stall
+	nop
+	nop
+	
+	jmp Jump		# Must be predicted as taken; ValC?
+	irmovq $33, %r10	# never executed, never in pipeline
+	irmovq $33, %r10	# never executed, never in pipeline
+
+	
+Jump:	irmovq $2, %rcx	# Should be in the pipeline after jmp
+	irmovq $1, %rbx
+	nop			# To avoid a confusing fetch stall due to reg.
+	nop
+	subq %rbx, %rdx	# rdx is negative
+	jg Pos1		# must be predicted as not-taken ...
+	nop			# ... so the nops should fill the pipeline
+	nop
+	nop
+	call dummy		# Must be predicted as called; ValC=0x100?
+				# Further, it must set rax to 4
+				
+	addq %rcx, %rax	# Should amount to 6.
+	jg Pos2		# Should be predicted as not taken.
+	irmovq $22, %r11	# Should be in the pipeline, but cancelled.
+	irmovq $22, %r11	# Should be in the pipeline, but cancelled.
+	halt
+	
+Pos1:	irmovq $33, %r10	# never executed, never in pipeline
+	irmovq $33, %r10	# never executed, never in pipeline
+	halt
+	
+Pos2:	andq %rax, %rax	# No change to registers, CC set?
+	ret
+	
+	
+/* $end jump-not-taken test */
+
+# The stack starts here and grows to lower addresses
+	.pos 0x400		
+stack:	 

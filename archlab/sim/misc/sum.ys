@@ -1,0 +1,42 @@
+# sum_list implementation
+# Execution begins at address 0 
+	.pos 0 
+	irmovq stack, %rsp  	# Set up stack pointer  
+	call main		# Execute main program
+	halt			# Terminate program 
+
+# three-element linked list
+	.align 8 	
+ele1:	.quad 0x00a
+	.quad ele2
+ele2:	.quad 0x0b0
+	.quad ele3
+ele3:	.quad 0xc00
+	.quad 0
+
+# main program
+main:	irmovq ele1,%rdi	
+	call sum_list		# sum_list(ele1)
+	ret 
+	
+/* $begin sum_list */
+# long sum_list(list_ptr ls)
+# ele1 in %rdi
+sum_list:
+	xorq %rax, %rax
+	andq %rdi, %rdi	# set CC
+	jmp test
+loop:
+	mrmovq $0(%rdi), %r8
+	mrmovq $8(%rdi), %r9
+	addq %r8, %rax
+	rrmovq %r9, %rdi	# shift to next node
+	andq %r9, %r9 		# set CC for the LL ptr
+test:
+	jne    loop            # Stop when 0
+	ret
+/* $end sum_list */
+
+# The stack starts here and grows to lower addresses
+	.pos 0x200		
+stack:	 

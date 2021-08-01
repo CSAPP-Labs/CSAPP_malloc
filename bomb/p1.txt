@@ -1,0 +1,6 @@
+break explode_bomb
+break phase_defused
+break secret_phase
+break read_line
+break strings_not_equal
+break phase_1

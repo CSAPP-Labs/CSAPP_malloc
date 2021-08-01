@@ -1,0 +1,42 @@
+# sum_list implementation
+# Execution begins at address 0 
+	.pos 0 
+	irmovq stack, %rsp  	# Set up stack pointer  
+	call main		# Execute main program
+	halt			# Terminate program 
+
+# three-element linked list
+	.align 8 	
+ele1:	.quad 0x00a
+	.quad ele2
+ele2:	.quad 0x0b0
+	.quad ele3
+ele3:	.quad 0xc00
+	.quad 0
+
+# main program
+main:	irmovq ele1,%rdi	
+	call rsum_list		# rsum_list(ele1)
+	ret 
+	
+/* $begin sum_list */
+# long rsum_list(list_ptr ls)
+# ele1 in %rdi
+rsum_list:
+	xorq %rax, %rax	# rax = 0
+	andq %rdi, %rdi	# set CC without changing rdi
+	jne else		# if not 0, goto else
+	ret
+else:
+	mrmovq $0(%rdi), %r10	# get nodeval
+	mrmovq $8(%rdi), %rdi	# get nextnode as arg for recursive. or use r11+rrmovq
+	pushq %r10
+	call rsum_list
+	popq %r10
+	addq %r10, %rax
+	ret
+/* $end rsum_list */
+
+# The stack starts here and grows to lower addresses
+	.pos 0x200		
+stack:	 

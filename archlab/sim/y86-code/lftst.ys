@@ -1,0 +1,50 @@
+# PIPE implementation test of the Fwd_A logic (signal e_valA) 
+# for load forwarding.
+# Instead of stalling between mem-reg and reg-mem move instructions, 
+# detect if the destination register for memory data in mrmov matches the 
+# source register to be used for the memory write in rmmov. Then, feed
+# this memory wire from the memory stage into the M_valA register via the
+# e_valA signal determined by forwarding logic in the execution stage.
+
+# Test of the detection logic for load/use hazard with allowance for 
+# load forwarding. Not clear how to see if this works.
+
+
+# Execution begins at address 0 
+	.pos 0 
+	irmovq stack, %rsp  	# Set up stack pointer  
+	call main		# Execute main program
+	halt			# Terminate program 
+
+
+
+# memory src, dest
+	.pos 0x100		
+	.align 8 	
+src:	.quad 0x00a		# src containing .quad 0x00a.
+dest:	.quad 0x111		# dest to be overwritten
+
+
+
+# main program
+main:	irmovq src, %rdi
+	irmovq dest, %rsi	
+	call lftst		# lftst(src, dest)
+	ret 
+	
+/* $begin load forwarding test */
+# long lftst(long *src, long *dest)
+lftst:	
+	xorq %rax, %rax	# rax = 0
+	mrmovq $0(%rdi), %rcx
+	rmmovq %rcx, $0(%rsi)
+	nop
+	nop
+	nop
+	mrmovq $0(%rsi), %rax
+	ret
+/* $end load forwarding test */
+
+# The stack starts here and grows to lower addresses
+	.pos 0x200		
+stack:	 

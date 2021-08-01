@@ -1,0 +1,380 @@
+#######################################################################
+# Test for copying block of size 63;
+#######################################################################
+	.pos 0
+main:	irmovq Stack, %rsp  	# Set up stack pointer
+
+	# Set up arguments for copy function and then invoke it
+	irmovq $63, %rdx		# src and dst have 63 elements
+	irmovq dest, %rsi	# dst array
+	irmovq src, %rdi	# src array
+	call ncopy		 
+	halt			# should halt with num nonzeros in %rax
+StartFun:
+#/* $begin ncopy-ys */
+##################################################################
+# ncopy.ys - Copy a src block of len words to dst.
+# Return the number of positive words (>0) contained in src.
+#
+# Include your name and ID here.
+#
+# Describe how and why you modified the baseline code.
+#
+##################################################################
+# Do not modify this portion
+# Function prologue.
+# %rdi = src, %rsi = dst, %rdx = len
+ncopy:
+
+##################################################################
+# You can modify this portion: 
+
+## Initial improvements:
+# Using iaddq for incrementing to reduce the number of instructions.
+# Ensuring that jumps are directed at the code branches more likely
+# to be taken.
+
+## Deeper improvements: 
+# Loop unrolling.
+# NOTE: the argument in favour of this approach is that memory is 
+# more abundant than processing capacity. 
+# Processing N elements at a time in the main loop. Prior to entering the 
+# loop, process an optional element in case the length is odd. This 
+# approach condenses incrementation of src/dest/len into fewer instructions
+# with larger constants. 
+# Expanding the approach to doing more elements in the loop would involve
+# checking the remaining length at the end of each iteration, but if done 
+# by copying this code, the optimization gains are diminishing if done 
+# without further improvements: 
+# N=10 CPE=8.41. N=8 CPE=8.49. N=6 CPE=8.66. N=2+odd1 CPE=8.9.
+
+# An improvement in check-if-neg. (tested via benchmark.pl)
+# First checking if there is ONE negative in a pair (xorq r10,r11 is then
+# neg) and thus skipping the second check altogether in roughly 50% of all
+# cases. This yields CPE=8.23 with the N=2+odd1 unrolling.
+# Combining this improvement with the verbose N=6+ yields CPE=7.92, N=10
+# about CPE 7.8, but again the returns are diminishing with more N.
+
+## Potential improvements:
+# Further optimization may involve checking the incremented src/dest 
+# against the ptr of the end element. But in the absence of hard-coded 
+# array length, and no shifts in the ISA, the way to compute len*8 may 
+# be to store it in memory, next to an 8-byte zero, then somehow misalign 
+# the read by +3 bytes,  which would have the effect of a 3-bit shift.
+
+## And more potentially after chapter 5.
+
+
+	# Loop header
+	xorq %rax,%rax		# count = 0;
+	
+	# Check if the array can be processed in blocks of N
+Mass:	rrmovq %rdx, %r11
+	iaddq $-10, %r11
+	jg Nth
+		
+	# # # # # # # BASIC N=2+ODD1
+	
+	# if odd, do one element then goto Npos. else cont. to loop
+	irmovq $1, %r11
+	andq %rdx, %r11
+	jle Even		
+	
+	# put into Npos and handle increments instead?
+	mrmovq $0(%rdi), %r10	# read val from src...
+	rmmovq %r10, $0(%rsi)	# ...and store it to dst	
+	iaddq $8, %rdi		# src++	
+	iaddq $8, %rsi		# dst++	
+	iaddq $-1, %rdx	# len--
+	
+	# Instead, check neg at Npos or Neg1 and share that step with loop?
+	# Need a better way to check if negative and increment
+	andq %r10, %r10
+	jle Even
+	iaddq $1, %rax
+
+	
+Even:	andq %rdx,%rdx		# len <= 0?
+	jg Loop		# if so, goto Done:assume arg len always >0
+	ret
+
+Loop:	mrmovq $0(%rdi), %r10	# read val from src...
+	rmmovq %r10, $0(%rsi)	# ...and store it to dst
+	
+	mrmovq $8(%rdi), %r11	# read val from src...
+	rmmovq %r11, $8(%rsi)	# ...and store it to dst	
+	
+	iaddq $16, %rdi	# src++	
+	iaddq $16, %rsi	# dst++
+	
+	# check if either element is negative; %r11 changes
+	xorq %r10, %r11	# val <= 0? 
+	jl Add1
+	andq %r10, %r10
+	jl Npos		# if neither negative, skip adds
+	iaddq $1, %rax		# count++
+Add1:	iaddq $1, %rax		# count++
+
+Npos:	iaddq $-2, %rdx	# len-- should also check len > 0 by set cc?
+	jg Loop		# if so, goto Loop:
+	jmp Done		# Not needed if N< (2+odd1)
+	
+	# # # # # # # END BASIC N=2+ODD1
+	
+	
+	
+	
+	# Process N elements in blocks of 2 ...
+Nth:	mrmovq $0(%rdi), %r10	# read val from src...
+	rmmovq %r10, $0(%rsi)	# ...and store it to dst
+	
+	mrmovq $8(%rdi), %r11	# read val from src...
+	rmmovq %r11, $8(%rsi)	# ...and store it to dst
+	
+	# check if either element is negative; %r11 changes
+	xorq %r10, %r11	# val <= 0? 
+	jl Add2
+	andq %r10, %r10
+	jl Cont1		# if neither negative, skip adds
+	iaddq $1, %rax		# count++
+Add2:	iaddq $1, %rax		# count++
+
+
+Cont1:	mrmovq $16(%rdi), %r10	# read val from src...
+	rmmovq %r10, $16(%rsi)	# ...and store it to dst
+	
+	mrmovq $24(%rdi), %r11	# read val from src...
+	rmmovq %r11, $24(%rsi)	# ...and store it to dst
+	
+	# check if either element is negative; %r11 changes
+	xorq %r10, %r11	# val <= 0? 
+	jl Add3
+	andq %r10, %r10
+	jl Cont2		# if neither negative, skip adds
+	iaddq $1, %rax		# count++
+Add3:	iaddq $1, %rax		# count++
+
+
+Cont2:	mrmovq $32(%rdi), %r10	# read val from src...
+	rmmovq %r10, $32(%rsi)	# ...and store it to dst
+	
+	mrmovq $40(%rdi), %r11	# read val from src...
+	rmmovq %r11, $40(%rsi)	# ...and store it to dst
+	
+	# check if either element is negative; %r11 changes
+	xorq %r10, %r11	# val <= 0? 
+	jl Add4
+	andq %r10, %r10
+	jl Cont3		# if neither negative, skip adds
+	iaddq $1, %rax		# count++
+Add4:	iaddq $1, %rax		# count++
+
+
+Cont3:	mrmovq $48(%rdi), %r10	# read val from src...
+	rmmovq %r10, $48(%rsi)	# ...and store it to dst
+	
+	mrmovq $56(%rdi), %r11	# read val from src...
+	rmmovq %r11, $56(%rsi)	# ...and store it to dst
+	
+	# check if either element is negative; %r11 changes
+	xorq %r10, %r11	# val <= 0? 
+	jl Add5
+	andq %r10, %r10
+	jl Cont4		# if neither negative, skip adds
+	iaddq $1, %rax		# count++
+Add5:	iaddq $1, %rax		# count++
+
+
+Cont4:	mrmovq $64(%rdi), %r10	# read val from src...
+	rmmovq %r10, $64(%rsi)	# ...and store it to dst
+	
+	mrmovq $72(%rdi), %r11	# read val from src...
+	rmmovq %r11, $72(%rsi)	# ...and store it to dst
+	
+	# check if either element is negative; %r11 changes
+	xorq %r10, %r11	# val <= 0? 
+	jl Add6
+	andq %r10, %r10
+	jl Cont5		# if neither negative, skip adds
+	iaddq $1, %rax		# count++
+Add6:	iaddq $1, %rax		# count++
+
+
+
+Cont5:	iaddq $80, %rdi	# src++	
+	iaddq $80, %rsi	# dst++
+	iaddq $-10, %rdx	# len-- should also check len > 0 by set cc?
+	jg Mass		# Check if another block
+
+
+##################################################################
+# Do not modify the following section of code
+# Function epilogue.
+Done:
+	ret
+##################################################################
+# Keep the following label at the end of your function
+End:
+#/* $end ncopy-ys */
+EndFun:
+
+###############################
+# Source and destination blocks 
+###############################
+	.align 8
+src:
+	.quad 1
+	.quad 2
+	.quad -3
+	.quad 4
+	.quad 5
+	.quad -6
+	.quad 7
+	.quad -8
+	.quad 9
+	.quad -10
+	.quad 11
+	.quad -12
+	.quad -13
+	.quad -14
+	.quad 15
+	.quad -16
+	.quad 17
+	.quad 18
+	.quad -19
+	.quad 20
+	.quad 21
+	.quad 22
+	.quad -23
+	.quad -24
+	.quad -25
+	.quad 26
+	.quad 27
+	.quad 28
+	.quad -29
+	.quad -30
+	.quad 31
+	.quad -32
+	.quad -33
+	.quad 34
+	.quad -35
+	.quad -36
+	.quad -37
+	.quad -38
+	.quad 39
+	.quad -40
+	.quad -41
+	.quad 42
+	.quad -43
+	.quad 44
+	.quad 45
+	.quad -46
+	.quad -47
+	.quad 48
+	.quad 49
+	.quad -50
+	.quad -51
+	.quad -52
+	.quad -53
+	.quad -54
+	.quad 55
+	.quad 56
+	.quad 57
+	.quad -58
+	.quad 59
+	.quad 60
+	.quad 61
+	.quad 62
+	.quad -63
+	.quad 0xbcdefa # This shouldn't get moved
+
+	.align 16
+Predest:
+	.quad 0xbcdefa
+dest:
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+	.quad 0xcdefab
+Postdest:
+	.quad 0xdefabc
+
+.align 8
+# Run time stack
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+
+Stack:
