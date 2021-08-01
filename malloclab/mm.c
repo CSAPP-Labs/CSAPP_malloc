@@ -21,7 +21,7 @@
 #include "mm.h"
 #include "memlib.h"
 // macros for memory management. implicit free list?
-// #include "mm_macros.h"
+#include "mm_macros.c"
 
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
