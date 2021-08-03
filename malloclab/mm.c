@@ -10,22 +10,33 @@
  * comment that gives a high level description of your solution.
  * 
  *
- * (AN): Description of implementation
+ * (AN): General discussion
  *
  * Provided with the lab is the memlib module which models a virtual
- * memory of MAX_HEAP ~20MB. The mdriver initializes this VM model by 
- * calling the mem_init() from the provided module. Within this model,
+ * memory of MAX_HEAP ~20MB, allocated by the actual libc malloc service. 
+ * The mdriver initializes this VM model by calling the mem_init() from 
+ * the provided module. 
+ * Within this model,
  * the student implementation (below) is initialized via mm_init. The 
  * core implementations of mm_malloc, mm_free, and mm_realloc are then
- * called by the driver on the traces provided with this lab.
+ * called by the mdriver on the traces provided with this lab.
  *
  * 
  * The memlib module maintains the start of the heap in the model, the 
- * current boundary of the used heap (mem_brk) and the maximum size of 
- * the heap, mem_max_addr. Extending the heap beyond that is illegal.
+ * current boundary of the heap in use (mem_brk) and the maximum legal 
+ * size of the heap, mem_max_addr. mem_brk is updated via the mem_sbrk()
+ * function when the heap is initialized, and subsequently whenever it
+ * is extended, should mm_malloc not find a suitable block size.
  * 
  * The core student implementations use macros from mm_macros.c. 
  * mm_init() initializes the heap with CHUNKSIZE.  
+ *
+ *
+ *
+ * AN: Description of implementation
+ * This implementation models the heap as an implicit free list, and 
+ * blocks with headers and footers.
+
  *
  */
 #include <stdio.h>
@@ -36,7 +47,7 @@
 
 #include "mm.h"
 #include "memlib.h"
-// macros for memory management. implicit free list?
+// macros for memory management. to be included in makefile?
 #include "mm_macros.c"
 
 /*********************************************************
@@ -87,7 +98,7 @@ int mm_init(void)
 
 
 	/* extend heap with a free block of CHUNKSIZE */
-	if (extend_heap(CHUNKSIZE) == NULL)
+	if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
 		return -1;
 
     return 0;
@@ -160,14 +171,39 @@ int mm_check(void)
 
 }
 
+
+/* extend the heap with a new free block. reconfigure the epilogue
+ * hdr. coalesce with adjacent block if the latter is free.
+ *
+ * called upon initializing the allocator, and whenever no block found.
+ *
+ */
 static void *extend_heap (size_t words)
+{
+	size_t size;
+	char *bp;
+
+	/* allocate even nr of words */
+	size = (words % 2)? ((words+1) * WSIZE) : (words * WSIZE);
+	if ((long)(bp = mem_sbrk(size)) == -1)
+		return NULL;
+
+	/* prep the header, footer and epilogue header */
+	PUT(HDRP(bp), PACK(size, 0));
+	PUT(FTRP(bp), PACK(size, 0));
+	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
+
+	return coalesce(bp); /* coalesce if prev block free */
+
+}
+
+static void *coalesce(void *bp) 
 {
 
 
 
+	
 }
-
-
 
 
 
