@@ -10,28 +10,42 @@
  * comment that gives a high level description of your solution.
  * 
  *
- * AN: General discussion
+ * AN: Discussion of general virtual memory model
  *
  * Provided with the lab is the memlib module which models a virtual
  * memory of MAX_HEAP ~20MB, allocated by the actual libc malloc service. 
  * The mdriver initializes this VM model by calling the mem_init() from 
  * the provided module, and drives all the testing with its main routine.
- *
- * The student implementation (below) is initialized via mm_init. The 
- * core implementations of mm_malloc, mm_free, and mm_realloc are then
- * called by the mdriver on the traces provided with this lab.
- *
  * 
  * The memlib module maintains the start of the heap in the model, the 
  * current boundary of the heap in use (mem_brk) and the maximum legal 
  * size of the heap, mem_max_addr. mem_brk is updated via the mem_sbrk()
  * function when the heap is initialized, and subsequently whenever it
  * is extended, should mm_malloc not find a suitable block size.
- * 
  *
- * AN: Description of implementation
- * This implementation models the heap as an implicit free list, and 
- * blocks with headers and footers.
+ * The student implementation (below) is initialized via mm_init. The 
+ * core implementations of mm_malloc, mm_free, and mm_realloc are then
+ * called by the mdriver on the traces provided with this lab.
+ *
+ *
+ * AN: Description of implementation #1: implicit free list
+ *
+ * The allocator models the heap as an in-place list; at an arbitrary
+ * moment of program execution, the list has an 8 byte prologue block with 
+ * only a header+footer, followed by a number of varying-size regular blocks
+ * each with a header and footer, and ended by a 0-byte epilogue block 
+ * consisting only of a header.
+ *
+ * word = 4bytes; double = 8bytes; HDR=FTR=word; min blk size=4words=16bytes.
+ * 
+ * When traversing the list, the next block is implicitly determined by
+ * adding the current block's size to its ptr. Allocation is possible for
+ * consecutive locations of the heap; a block's neighbours in the list are
+ * also the ones adjacent to it in memory. The list can thus be at any point
+ * a mix of free and allocated blocks. 
+ *
+ * Defragmenting the list can involve:
+ * coalescing any adjacent free blocks.
 
  *
  */
@@ -75,11 +89,15 @@ team_t team = {
 
 /* always points at prologue block of heap */
 static void *heap_listp; // = mem_heap_lo();
+static void *rover;
 
 /* declare helper fcns */
 static void *extend_heap (size_t words);
 static void *coalesce(void *bp);
-static void *find_fit(size_t asize);
+static void defragment(void);
+static void *first_fit(size_t asize);
+static void *best_fit(size_t asize);
+static void *next_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static int mm_check(void);
 
@@ -96,12 +114,17 @@ int mm_init(void)
 	if ( (heap_listp = mem_sbrk(2*DSIZE))== (void *)-1)
 		return -1;
 
-	/* alignment; prologue hdr; prologue ftr; epilogue hdr */
+	/* alignment padding; prologue hdr; prologue ftr; epilogue hdr */
 	PUT(heap_listp, 0);
 	PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));
 	PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));
 	PUT(heap_listp + (3*WSIZE), PACK(0, 1));
-	heap_listp+=DSIZE; // points right after prologue block?
+	heap_listp+=(2*WSIZE); // points right after prologue block?
+
+	/* initial next fit search starts at beginning */
+	rover = heap_listp;
+
+	// printf("The heap_listp ptr is currently %x\n", heap_listp);
 
 
 	/* extend heap with a free block of CHUNKSIZE */
@@ -115,6 +138,8 @@ int mm_init(void)
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
+
+
 void *mm_malloc(size_t size)
 {
 
@@ -129,6 +154,7 @@ void *mm_malloc(size_t size)
         return (void *)((char *)p + SIZE_T_SIZE);
     }
 	*/
+
 
     /* First implementation of malloc */
 
@@ -148,8 +174,9 @@ void *mm_malloc(size_t size)
     }
 
     /* search for suitable block via some fit method, and allocate */
-    if ((bp = find_fit(asize)) != NULL) {
+    if ((bp = next_fit(asize)) != NULL) {
     	place(bp, asize);
+    	// mm_check();
     	return bp;
     }
 
@@ -159,6 +186,7 @@ void *mm_malloc(size_t size)
     if ((bp = extend_heap(extendedsize/WSIZE)) == NULL) 
     	return NULL;
 
+    // mm_check();
     place(bp, extendedsize);
     return bp;
 
@@ -166,21 +194,29 @@ void *mm_malloc(size_t size)
 }
 
 /*
- * mm_free - Freeing a block does nothing. (in basic version)
+ * mm_free - 
+ * naive: 	Freeing a block does nothing. 
+ * implicit list: Freeing a block coalesces it with adjacents, 
+ * and marks the block as free.
+ *
  */
 void mm_free(void *ptr)
 {
-
+	
 	/* First implementation of free */
     /* mark hdr and ftr as free, and coalesce with neighbors if possible */
     size_t size = GET_SIZE(HDRP(ptr));
 	PUT(HDRP(ptr), PACK(size, 0));
 	PUT(FTRP(ptr), PACK(size, 0));
 	coalesce(ptr);
+
+	// defragment();
+	
 }
 
 /*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
+ * mm_realloc - 
+ * basic: 	Implemented simply in terms of mm_malloc and mm_free
  */
 void *mm_realloc(void *ptr, size_t size)
 {
@@ -206,7 +242,11 @@ void *mm_realloc(void *ptr, size_t size)
 }
 
 
-/* helper functions */
+
+
+
+
+/* --------------- helper functions --------------- */
 
 /* heap checker - where to call, what to report? 
  *
@@ -214,12 +254,35 @@ void *mm_realloc(void *ptr, size_t size)
  * any contiguous free blocks that escaped coalescing?
  * is every free block actually in the free list?
  * do the pointers in the free list point to free blocks?
- * do any allocated blocks overlap?
  * do the pointers in a heap block point to valid heap addresses?
+
+ * do any allocated blocks overlap? mdriver tracks blocks via linked list,
+ * where each node is constructed from a line in a trace file. given a 
+ * heap start, it can also track payloads and check if they overlap.
+
  */
 static int mm_check(void)
 {
+	
+	/* any contiguous free blocks that escaped coalescing? */
+	int prev_allocated = 1;
+	int unmerged_free_blocks = 0; // counts each border bracketed by free blox
+	void *bp = heap_listp;
 
+
+	while (GET_SIZE(HDRP(bp))) {
+
+		if (!(GET_ALLOC(HDRP(bp))) & !(prev_allocated)) {
+			unmerged_free_blocks++;
+			
+		}
+
+		prev_allocated = GET_ALLOC(HDRP(bp));
+		
+		bp = NEXT_BLKP(bp);
+	}
+
+	printf("There are %d unmerged free blocks. \n", unmerged_free_blocks);
 
 
 	return 1; // HEAP OK
@@ -229,6 +292,7 @@ static int mm_check(void)
 
 /* extend the heap with a new free block.
  * called upon initializing the allocator, and whenever no block found.
+ * NOTE: it seems to be called often to the effect of making examination difficult
  */
 static void *extend_heap (size_t words)
 {
@@ -245,11 +309,15 @@ static void *extend_heap (size_t words)
 	PUT(FTRP(bp), PACK(size, 0));
 	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
 
+	// mm_check();
+
 	return coalesce(bp); /* coalesce if prev block free */
 
 }
 
-/* coalesce with neighboring blocks if they are free */
+/* coalesce with neighboring blocks if they are free 
+ * assumes that the current block, bp, is free
+ */
 static void *coalesce(void *bp) 
 {
 	/* status of neighbor blocks, size of current */
@@ -260,6 +328,8 @@ static void *coalesce(void *bp)
 	/* possible cases when coalescing with neighbors */
 
 	if (prev_alloc & next_alloc) { /* both allocated */
+		// mm_check();
+
 		return bp;
 
 	} else if (prev_alloc & (!next_alloc)) { /* coalesce with next*/
@@ -283,11 +353,23 @@ static void *coalesce(void *bp)
 	}
 
 
+	/* This code needed for next_fit()
+	 * make sure that the rover which remembers where the fitment fcn left off
+	 * is not pointing into a block which just got coalesced. Without this
+	 * verification, the rover will eventually point into a coalesced block,
+	 * and given the right allocation bit value, the next payload will overlap
+	 * with an existing one.
+	 */
+	if ((rover > bp) && (rover < NEXT_BLKP(bp)))
+		rover = (bp);
+
+
 	return bp;
 }
 
 /* first fit */
-static void *find_fit(size_t asize) {
+static void *first_fit(size_t asize) 
+{
 
 	void *bp = heap_listp; 
 	
@@ -305,13 +387,66 @@ static void *find_fit(size_t asize) {
 
 }
 
-/* placement helper */
+/* best fit; bad performance with implicit list since entire list must
+ * be scanned
+ */ 
+
+static void *best_fit(size_t asize) 
+{
+
+}
+
+/* next fit: performance almost identical to first_fit in implicit list.
+ * start each search where the previous one left off. 
+ * then, loop back around to the start until that location if needed. */
+static void *next_fit(size_t asize) 
+{
+
+	void *oldrover = rover;
+	
+	/* from rover to end of block list */
+	while (GET_SIZE(HDRP(rover))) {
+	
+		if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover)))) {
+			return rover;
+		}
+		
+		rover = NEXT_BLKP(rover);
+	}
+
+
+	/* from start of block list to rover */
+	rover = (heap_listp);
+	while (/*GET_SIZE(HDRP(rover)) &&*/ (rover < oldrover)) {
+
+		if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover)))) {
+			return rover;
+		}
+		
+		rover = NEXT_BLKP(rover);
+	}
+
+
+	/* if not found */
+	return NULL;
+
+
+}
+
+
+
+/* placement helper 
+ * assumes that bp is free, and the block big enough for asize
+ * after this call, bp points to an allocated block.
+ * but it may produce an unallocated next block.
+ */
 static void place(void *bp, size_t asize) {
 
 	size_t remainder = GET_SIZE(HDRP(bp)) - asize;
-	size_t rounded_remainder;
+	size_t minimum_split = 2*DSIZE; // remainder
+	// size_t rounded_remainder;
 
-	if ( remainder >= (2*DSIZE) ) { // split
+	if ( remainder >= (minimum_split) ) { // split
 		
 		// shorten the allocated block
 		PUT(HDRP(bp), PACK(asize, 1));
@@ -319,9 +454,9 @@ static void place(void *bp, size_t asize) {
 		
 		// create the cut, free block
 		bp = NEXT_BLKP(bp);
-		rounded_remainder = DSIZE * ((remainder + DSIZE - 1)/DSIZE);
-		PUT(HDRP(bp), PACK(rounded_remainder, 0));
-		PUT(FTRP(bp), PACK(rounded_remainder, 0));
+		// rounded_remainder = DSIZE * ((remainder + DSIZE - 1)/DSIZE);
+		PUT(HDRP(bp), PACK(remainder, 0));
+		PUT(FTRP(bp), PACK(remainder, 0));
 		
 	} else { // keep current block size
 		PUT(HDRP(bp), PACK(GET_SIZE(HDRP(bp)), 1));
@@ -331,7 +466,27 @@ static void place(void *bp, size_t asize) {
 	return;
 }
 
+/* a defrag routine, called at every free.
+ * coalesces if a block is unallocated
+ */
 
+
+static void defragment(void)
+{
+
+	void *bp = heap_listp;
+
+
+	while (GET_SIZE(HDRP(bp))) {
+
+		if (!(GET_ALLOC(HDRP(bp))))
+			bp = coalesce(bp);
+		
+		bp = NEXT_BLKP(bp);
+	}
+
+
+}
 
 
 
