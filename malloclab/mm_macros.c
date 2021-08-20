@@ -26,6 +26,7 @@
 #define FTRP(bp) ((char *)bp + GET_SIZE(HDRP(bp)) - DSIZE)
 
 #define NEXT_BLKP(bp) ((char *)bp + GET_SIZE((char *)bp - WSIZE))  /* can also be done by (char *)FTRP(bp) + DSIZE ?*/
-#define PREV_BLKP(bp) ((char *)bp - GET_SIZE((char *)bp - DSIZE)) 
+#define PREV_BLKP(bp) ((char *)bp - GET_SIZE((char *)bp - DSIZE))  /* operates on previous footer */
 
-
+/* ADDON_1: for optimizing the footer out of allocated blocks */
+#define GET_ALLOC_PREV(p) (GET(p) & 0x2)
