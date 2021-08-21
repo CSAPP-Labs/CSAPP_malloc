@@ -1,14 +1,10 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
+ * mm-naive.c - The fastest, least memory-efficient malloc package.(initial)
  * 
  * In this naive approach, a block is allocated by simply incrementing
  * the brk pointer.  A block is pure payload. There are no headers or
  * footers.  Blocks are never coalesced or reused. Realloc is
  * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
- * 
  *
  * AN: Discussion of general virtual memory model
  *
@@ -140,8 +136,6 @@ int mm_init(void)
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
-
-
 void *mm_malloc(size_t size)
 {
 
@@ -168,11 +162,12 @@ void *mm_malloc(size_t size)
     if (size == 0)
     	return NULL;
 
+    /* ADDON_1: minimum size can become DSIZE, in case size less than WSIZE*/
     if (size <= DSIZE) {
     	asize = 2*DSIZE;
     } else {
     	/* round up to nearest 8, and add 8 for overhead */
-    	/* ADDON_1: in case of no-footer design, 4 for overhead (potential error)*/
+    	/* ADDON_1: in case of no-footer design, overhead of 4 (potential error)*/
     	asize = ((size + WSIZE + (DSIZE - 1))/DSIZE) * DSIZE;
     }
 
@@ -278,7 +273,7 @@ static void *extend_heap (size_t words)
 	/* prep the header, footer and epilogue header */
 	PUT(HDRP(bp), PACK(size, 0+prev_alloc));
 	PUT(FTRP(bp), PACK(size, 0+prev_alloc));
-	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // epilogue's prev. not allocated
+	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* epilogue's prev. not allocated */
 
 	// mm_check();
 
@@ -301,7 +296,6 @@ static void *coalesce(void *bp)
 	int prev_prev_alloc;
 
 	/* possible cases when coalescing with neighbors */
-
 	if (prev_alloc & next_alloc) { /* both allocated */
 		// mm_check();
 
@@ -313,7 +307,7 @@ static void *coalesce(void *bp)
 		PUT(FTRP(bp), PACK(size, 0+2)); 
 
 	} else if ((!prev_alloc) & next_alloc) { /* coalesce with prev */
-		/* ADDON_1: obtain info on the second to previous block */
+		/* ADDON_1: obtain info on the second to previous block. Necessarily allocated? */
 		prev_prev_alloc = GET_ALLOC_PREV(HDRP(PREV_BLKP(bp)));
 		size+= GET_SIZE(FTRP(PREV_BLKP(bp)));
 		PUT(HDRP(PREV_BLKP(bp)), PACK(size, prev_prev_alloc+0));
@@ -321,7 +315,7 @@ static void *coalesce(void *bp)
 		bp = PREV_BLKP(bp);
 
 	} else { /* coalesce with both */
-		/* ADDON_1: obtain info on the second to previous block */
+		/* ADDON_1: obtain info on the second to previous block. Necessarily allocated? */
 		prev_prev_alloc = GET_ALLOC_PREV(HDRP(PREV_BLKP(bp)));
 		size+= GET_SIZE(FTRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
 		PUT(HDRP(PREV_BLKP(bp)), PACK(size, prev_prev_alloc+0));
@@ -356,7 +350,7 @@ static void *first_fit(size_t asize)
 		bp = NEXT_BLKP(bp);
 	}
 
-	// if not found
+	/* if not found */
 	return NULL;
 
 }
@@ -402,8 +396,6 @@ static void *next_fit(size_t asize)
 
 }
 
-
-
 /* placement helper 
  * assumes that bp is free, and the block big enough for asize
  * after this call, bp points to an allocated block.
@@ -422,14 +414,14 @@ static void place(void *bp, size_t asize) {
 		/* ADDON_1: don't include ftr */
 		// PUT(FTRP(bp), PACK(asize, 1)); 
 		
-		/* cut remainder to leave a free block */
+		/* cut remainder to leave a free block; previous is allocated (+2) */
 		bp = NEXT_BLKP(bp);
 		PUT(HDRP(bp), PACK(remainder, 0+2));
 		PUT(FTRP(bp), PACK(remainder, 0+2));
 		
 	} else { // keep current block size
 		/* store status of current block */
-		/* ADDON_1: get status of previous as well */
+		/* ADDON_1: get status of previous as well. Necessarily allocated? */
 		PUT(HDRP(bp), PACK(GET_SIZE(HDRP(bp)), GET_ALLOC_PREV(HDRP(bp)) + 1));
 		// PUT(FTRP(bp), PACK(GET_SIZE(HDRP(bp)), 1)); 
 
@@ -440,9 +432,7 @@ static void place(void *bp, size_t asize) {
 	return;
 }
 
-/* a defrag routine, called at every free.
- * coalesces if a block is unallocated
- */
+/* a defrag routine, called at every free. Coalesces if a block is unallocated. */
 static void defragment(void)
 {
 
@@ -468,10 +458,10 @@ static void defragment(void)
  * do the pointers in a heap block point to valid heap addresses?
 
  * do any allocated blocks overlap? mdriver tracks blocks via linked list,
- * where each node is constructed from a line in a trace file. given a 
- * known heap start, it can also track payloads and check if they overlap, 
- * as the driver calls malloc and scans the LL struct nodes
-
+ * where each node is constructed from a line (allocation request) in a 
+ * trace file. given a known heap start, it can also track payloads and 
+ * check if they overlap, as the driver calls mm_malloc and scans the LL 
+ * struct nodes.
  */
 static int mm_check(void)
 {
