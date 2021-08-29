@@ -17,7 +17,7 @@
  */
 #define PACK(size, alloc) ((size) | (alloc))
 #define GET(p) (*(unsigned int *)(p))
-#define PUT(p, val) (*(unsigned int *)(p) = (val))
+#define PUT(p, val) (*(unsigned int *)(p) = (val)) /* stores 4 bytes at increasing address? */
 
 #define GET_SIZE(p) (GET(p) & ~0x7)
 #define GET_ALLOC(p) (GET(p) & 0x1)
@@ -33,3 +33,22 @@
  * is in the next bit.
  */
 #define GET_ALLOC_PREV(p) (GET(p) & 0x2)
+
+/* Explicit free list: linked list traversal helpers */
+
+/* this should be doable with the PUT macro */
+#define PRED(bp) ((unsigned int **)((char *)bp))
+#define SUCC(bp) ((unsigned int **)((char *)bp + DSIZE))
+
+/* debugging helpers */
+// #define DEBUG
+
+#ifndef DEBUG
+#define CHECK(msg, arg1, arg2) ((void)0) 
+#define INTERRUPT(count, max) ((void)0)
+#else
+#define CHECK(msg, arg1, arg2) printf(msg, arg1, arg2); mm_check()
+#define INTERRUPT(count, max) if (count > max) {exit(0);}
+#endif
+
+
