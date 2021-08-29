@@ -44,10 +44,10 @@
 // #define DEBUG
 
 #ifndef DEBUG
-#define CHECK(msg, arg1, arg2) ((void)0) 
+#define CHECK(msg, verbose, arg1, arg2) ((void)0) 
 #define INTERRUPT(count, max) ((void)0)
 #else
-#define CHECK(msg, arg1, arg2) printf(msg, arg1, arg2); mm_check()
+#define CHECK(msg, verbose, arg1, arg2) if (verbose == 1) {printf(msg, arg1, arg2);} mm_check(verbose)
 #define INTERRUPT(count, max) if (count > max) {exit(0);}
 #endif
 
