@@ -67,6 +67,12 @@
  *
  * Description of implementation #2: explicit free lists
  * 
+ * The design is implemented as a layer on top of the implicit free list design.
+ * Block headers and footers are preserved for the purpose of overview of heap
+ * morphology. A doubly-linked list is maintained to track free blocks, by 
+ * including predecessor and successor pointers within each free block, thus 
+ * increasing the constraint of minimum block size to hdr+pred+succ+ftr. 
+ * 
  *
  */
 #include <stdio.h>
@@ -98,20 +104,20 @@ team_t team = {
     ""
 };
 
-/* single word (4) or double word (8) alignment */
-#define ALIGNMENT 8
-
-/* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
-
-
-#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+/* These macros used in basic unmodified malloc package; not with current design */
+// /* single word (4) or double word (8) alignment */
+// #define ALIGNMENT 8
+//  rounds up to the nearest multiple of ALIGNMENT 
+// #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
+// #define SIZE_T_SIZE (ALIGN(sizeof(size_t))) 
 
 
 static void *heap_listp; /* always points at prologue block of heap */
 static void *rover; /* maintained for next_fit() */
 static void *list_start; /* for explicit free list, linked list design */
-static int minblock = 3*DSIZE; /* hdr + pred + succ + ftr */
+
+/* payload_size could be included in the header for overlap, and to track internal fragmentation*/
+static int minblock = 3*DSIZE; /* hdr + pred + succ + ftr (+ request_id + payload_size, for debugging) */
 
 /* declare helper fcns */
 static void *extend_heap (size_t words);
@@ -132,7 +138,11 @@ static void printnode(void *bp);
 static int checknode(void *bp);
 
 static int request_count = -1;
-static int max_requests = 1400; /* depends on trace; prematurely end mdriver tests */
+
+/* depends on trace file; this limit is to prematurely end mdriver tests and inspect 
+ * where the allocation might have failed. if the entire trace should be run, then
+ * the limit is ten times that of its requests, because mdriver runs each trace x10*/
+static int max_requests = 3000 * 10; 
 static int verbose = 0;
 
 /* linked list helpers */
@@ -195,8 +205,8 @@ void *mm_malloc(size_t size)
     	asize = ((size + DSIZE + (DSIZE - 1))/DSIZE) * DSIZE;
     }
 
+    /* debugging macros only execute if DEBUG is defined */
     INTERRUPT(request_count, max_requests);
-
 	CHECK("Before allocation nr %d of size [%d]\n", verbose, request_count, asize);
 
     /* search for suitable block via some fit method, and allocate */
@@ -209,7 +219,7 @@ void *mm_malloc(size_t size)
     	return bp;
     }
 
-    /* defer coalescing to when allocation fails */
+    /* defer coalescing to when allocation fails, then try allocating via fit again */
     /*
     defragment();
      if ((bp = first_fit(asize)) != NULL) {
@@ -258,19 +268,26 @@ void mm_free(void *ptr)
 	/* coalescing does list insertion and pred/succ ptr setup, otherwise it would need to be done here */
 	coalesce(ptr);
 
-	CHECK("After freeing addr %p\n", verbose, ptr, NULL);
 
+	CHECK("After freeing addr %p\n", verbose, ptr, NULL);
 }
 
 /*
- * mm_realloc - 
+ * mm_realloc - ptr must either be NULL, or a value returned 
+ * by a previous call to malloc. size must be nonnegative.
+ *
  * basic: 	Implemented simply in terms of mm_malloc and mm_free
+ * Performance of basic realloc is bad; util of 26% and 34% for
+ * the realloc tests 1 and 2 respectively.
+ *
  * modified: needs to be a dedicated implementation of realloc
  */
 void *mm_realloc(void *ptr, size_t size)
 {
+	CHECK("At entry of realloc.\n", verbose, NULL, NULL);
 
 	/* basic implementation of realloc */
+
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
@@ -278,13 +295,55 @@ void *mm_realloc(void *ptr, size_t size)
     newptr = mm_malloc(size);
     if (newptr == NULL)
       return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    copySize = (size_t)(GET_SIZE(HDRP(ptr)));
     if (size < copySize)
       copySize = size;
     memcpy(newptr, oldptr, copySize);
     mm_free(oldptr);
     return newptr;
 
+
+
+    /* dedicated implementation of realloc */
+
+
+	// void *oldptr = ptr;
+ //    void *newptr;
+	// size_t copySize;
+
+ //    if (ptr == NULL)
+ //    	return (mm_malloc(size));
+
+ //    if (size == 0) {
+ //    	mm_free(ptr);
+ //    	return NULL; /* or ptr; should it return the old ptr? it is no longer a valid location */
+ //    }
+
+ //    /* ptr not NULL; must have been returned by earlier call to mm_malloc(ptr) */
+ //    newptr = mm_malloc(size);
+
+ //     determine how much of the old block can be copied into the new; 
+ //     * but should this be the payload or the entire padded block? 
+ //    copySize = (size_t)(GET_SIZE(HDRP(ptr)));
+ //    if (size < copySize)
+ //      copySize = size;
+
+ //  	/* copy the memory content once the block is allocated via newptr */
+ //  	memcpy(newptr, oldptr, copySize);
+ //  	mm_free(oldptr);
+ //  	return newptr;
+
+
+
+
+
+
+
+
+
+
+	CHECK("At exit of realloc.\n", verbose, NULL, NULL);
 }
 
 /* --------------- helper functions --------------- */
