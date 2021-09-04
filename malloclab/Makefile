@@ -7,7 +7,8 @@ HANDINDIR = /afs/cs.cmu.edu/academic/class/15213-f01/malloclab/handin
 
 CC = gcc
 # Added the -g and -O0 flag to include debugging symbols
-CFLAGS = -Wall -O0 -m32 -g
+# Added -pg for gprof
+CFLAGS = -Wall -O0 -m32 -g -pg
 
 OBJS = mdriver.o mm.o memlib.o fsecs.o fcyc.o clock.o ftimer.o
 

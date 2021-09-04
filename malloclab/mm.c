@@ -1,13 +1,4 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.(initial)
- * 
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * Further comments by AN (Adam) 
- * 
  * Discussion of general virtual memory model
  *
  * Provided with the lab is the memlib module which models a virtual
@@ -55,12 +46,7 @@
  * also the ones adjacent to it in memory. The list can thus be at any point
  * a mix of free and allocated blocks. 
  *
- * ADDON_0: inserted necessary code for next_fit() into mm_init and coalesce:
- * make sure that the rover which remembers where the fitment fcn left off
- * is not pointing into a block which just got coalesced. Without this
- * verification, the rover will eventually point into a coalesced block,
- * and given the right allocation bit value, the next payload will overlap
- * with an existing one.
+ * ADDON_0: next_fit() thrown out for linked list designs.
  *
  * ADDON_1: modification to eliminate need for a footer in allocated blox.
  *
@@ -73,6 +59,14 @@
  * including predecessor and successor pointers within each free block, thus 
  * increasing the constraint of minimum block size to hdr+pred+succ+ftr. 
  * 
+ * Design performance: overall util 46/60, thru 40/40. Design of double-linked 
+ * free list with LIFO free block maintenance, best-fit algorithm tweaked to 
+ * stop searching for a better fit after 100 scanned free blocks. Main short-
+ * coming are the traces of reallocs, binaries, and coalescing, which have util 
+ * of around 30/60. Increasing CHUNKSIZE over 1<<12 yields no significant changes, 
+ * but it breaks an assumption by the realloc function specifically at 1<<10, 
+ * likely hitting some edge condition. Below 1<<9, util improves up to 53/60 but
+ * throughput drops below 35/40.
  *
  */
 #include <stdio.h>
@@ -80,12 +74,9 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
-
 #include "mm.h"
 #include "memlib.h"
-
-/* macros for memory management. */
-#include "mm_macros.c"
+#include "mm_macros.c" /* macros for memory management. */
 
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
@@ -104,29 +95,38 @@ team_t team = {
     ""
 };
 
-/* These macros used in basic unmodified malloc package; not with current design */
-// /* single word (4) or double word (8) alignment */
-// #define ALIGNMENT 8
-//  rounds up to the nearest multiple of ALIGNMENT 
-// #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
-// #define SIZE_T_SIZE (ALIGN(sizeof(size_t))) 
-
-
+/* global variables for allocator design */
 static void *heap_listp; /* always points at prologue block of heap */
-static void *rover; /* maintained for next_fit() */
 static void *list_start; /* for explicit free list, linked list design */
 
 /* payload_size could be included in the header for overlap, and to track internal fragmentation*/
 static int minblock = 3*DSIZE; /* hdr + pred + succ + ftr (+ request_id + payload_size, for debugging) */
 
+/* global variables for debugging*/
+static int request_count = -1;
+/* depends on trace file; this limit is to prematurely end mdriver tests and inspect 
+ * where the allocation might have failed. if the entire trace should be run, then
+ * the limit is ten times that of its requests, because mdriver runs each trace x10*/
+static int max_requests = 3000 * 10; 
+static int verbose = 1;
+
+
+
 /* declare helper fcns */
 static void *extend_heap (size_t words);
 static void *coalesce(void *bp);
+static void place(void *bp, size_t asize);
+
 static void defragment(void);
+
 static void *first_fit(size_t asize);
 static void *best_fit(size_t asize);
-static void *next_fit(size_t asize);
-static void place(void *bp, size_t asize);
+
+static size_t pad_size (size_t size);
+
+/* linked list helpers */
+static void prependBlockToList(void *bp, unsigned int *target);
+static void removeBlockFromList(void *bp);
 
 /* declare heap checker helpers */
 static int mm_check(int verbose);
@@ -136,18 +136,9 @@ static void printblock(void *bp);
 static int checkblock(void *bp);
 static void printnode(void *bp);
 static int checknode(void *bp);
+static int blockNotInList(void *ptr);
 
-static int request_count = -1;
 
-/* depends on trace file; this limit is to prematurely end mdriver tests and inspect 
- * where the allocation might have failed. if the entire trace should be run, then
- * the limit is ten times that of its requests, because mdriver runs each trace x10*/
-static int max_requests = 3000 * 10; 
-static int verbose = 0;
-
-/* linked list helpers */
-static void prependBlockToList(void *bp, unsigned int *target);
-static void removeBlockFromList(void *bp);
 
 
 /* mm_init - initialize the malloc package */
@@ -168,9 +159,6 @@ int mm_init(void)
 	/* Points at prologue, end of hdr start of ftr */
 	heap_listp+=(2*WSIZE); 
 
-	/* ADDON_0: initial next fit search starts at beginning */
-	rover = heap_listp;
-
 	/* list of free blocks starts with dummy block, otherwise NULL */
 	list_start = NULL;
 
@@ -187,7 +175,6 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-
     /* pad the requested size, return if size too small */
     size_t asize;
     size_t extendedsize;
@@ -197,24 +184,17 @@ void *mm_malloc(size_t size)
     	return NULL;
 
     request_count++; /* keep count of malloc requests for debugging */
-
-    if (size <= (2*DSIZE)) {
-    	asize = minblock;
-    } else {
-    	/* round up to nearest 8, and add 4 for hdr; 8 if allocated block needs hdr+ftr */
-    	asize = ((size + DSIZE + (DSIZE - 1))/DSIZE) * DSIZE;
-    }
+    asize = pad_size(size);
 
     /* debugging macros only execute if DEBUG is defined */
     INTERRUPT(request_count, max_requests);
 	CHECK("Before allocation nr %d of size [%d]\n", verbose, request_count, asize);
 
     /* search for suitable block via some fit method, and allocate */
-    /* each unique allocated bp address gets its request_id, later matched with mm_free()?*/
-    if ((bp = first_fit(asize)) != NULL) {
+    if ((bp = best_fit(asize)) != NULL) {
     	place(bp, asize);
 
-    	CHECK("After allocation %d by fit fcn\n", verbose, request_count, NULL);
+    	// CHECK("After allocation %d by fit fcn\n", verbose, request_count, NULL);
 
     	return bp;
     }
@@ -234,11 +214,11 @@ void *mm_malloc(size_t size)
     	return NULL;
     }
 
-	CHECK("After extension via extend_heap+coalesce, prior to placing.\n", verbose, NULL, NULL);
+	// CHECK("After extension via extend_heap+coalesce, prior to placing.\n", verbose, NULL, NULL);
     
     place(bp, asize);
 
-	CHECK("After allocation via extend_heap+coalescing, after placing.\n", verbose, NULL, NULL);
+	// CHECK("After allocation via extend_heap+coalescing, after placing.\n", verbose, NULL, NULL);
 
     return bp;
 }
@@ -268,8 +248,7 @@ void mm_free(void *ptr)
 	/* coalescing does list insertion and pred/succ ptr setup, otherwise it would need to be done here */
 	coalesce(ptr);
 
-
-	CHECK("After freeing addr %p\n", verbose, ptr, NULL);
+	// CHECK("After freeing addr %p\n", verbose, ptr, NULL);
 }
 
 /*
@@ -280,14 +259,14 @@ void mm_free(void *ptr)
  * Performance of basic realloc is bad; util of 26% and 34% for
  * the realloc tests 1 and 2 respectively.
  *
- * modified: needs to be a dedicated implementation of realloc
+ * modified: dedicated implementation of realloc
  */
 void *mm_realloc(void *ptr, size_t size)
 {
 	CHECK("At entry of realloc.\n", verbose, NULL, NULL);
 
 	/* basic implementation of realloc */
-
+/*
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
@@ -295,7 +274,6 @@ void *mm_realloc(void *ptr, size_t size)
     newptr = mm_malloc(size);
     if (newptr == NULL)
       return NULL;
-    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
     copySize = (size_t)(GET_SIZE(HDRP(ptr)));
     if (size < copySize)
       copySize = size;
@@ -303,48 +281,105 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(oldptr);
     return newptr;
 
-
-
+*/
     /* dedicated implementation of realloc */
+	void *oldptr = ptr;
+    void *newptr;
+    void *prev_ptr;
+    void *next_ptr;
+	size_t copySize;
+	size_t asize;
 
+	size_t size_current;
+	size_t size_previous;
+	size_t size_next;
 
-	// void *oldptr = ptr;
- //    void *newptr;
-	// size_t copySize;
+	/* generic case of NULL ptr */
+    if (ptr == NULL)
+    	return (mm_malloc(size));
 
- //    if (ptr == NULL)
- //    	return (mm_malloc(size));
+    /* generic case of size == 0 */
+    if (size == 0) {
+    	mm_free(ptr);
+    	return NULL; 
+    }
 
- //    if (size == 0) {
- //    	mm_free(ptr);
- //    	return NULL; /* or ptr; should it return the old ptr? it is no longer a valid location */
- //    }
+    /* ptr not NULL; must have been returned by earlier call to mm_malloc(ptr). */
+    copySize = (size_t)(GET_SIZE(HDRP(ptr)));
+    asize = pad_size(size);
+    if (copySize == asize)
+    	return oldptr;
 
- //    /* ptr not NULL; must have been returned by earlier call to mm_malloc(ptr) */
- //    newptr = mm_malloc(size);
+    /* Coalesce with neighbouring free block if the sum suffices for realloc */
+    if (asize > copySize) {
 
- //     determine how much of the old block can be copied into the new; 
- //     * but should this be the payload or the entire padded block? 
- //    copySize = (size_t)(GET_SIZE(HDRP(ptr)));
- //    if (size < copySize)
- //      copySize = size;
+    	prev_ptr = PREV_BLKP(ptr);
+    	next_ptr = NEXT_BLKP(ptr);
+		size_current = GET_SIZE(HDRP(ptr));
+		size_previous = GET_SIZE(HDRP(prev_ptr));
+		size_next = GET_SIZE(HDRP(next_ptr));
 
- //  	/* copy the memory content once the block is allocated via newptr */
- //  	memcpy(newptr, oldptr, copySize);
- //  	mm_free(oldptr);
- //  	return newptr;
+	    /* expansion towards higher addresses is preferred */
+		if (!(GET_ALLOC(HDRP(next_ptr))) && ((size_current + size_next) >= asize)) {
 
+	    	/* remove subsequent block from the list */
+			if (next_ptr == list_start) {
+				list_start = *(SUCC(next_ptr));
+			} else {
+				removeBlockFromList(next_ptr);
+			}
 
+			/* join it to the current block */
+			PUT(HDRP(ptr), PACK((size_current+size_next), GET_ALLOC_PREV(HDRP(ptr)) + 1));
+			PUT(FTRP(ptr), PACK((size_current+size_next), GET_ALLOC_PREV(HDRP(ptr)) + 1)); 
 
+			place(oldptr, asize);
+			return oldptr;    	
+	    } 
 
+	    /* expansion backwards towards lower addresses involves memmove() */
+		if (!(GET_ALLOC(HDRP(prev_ptr))) && ((size_current+size_previous) >= asize)) {
 
+	    	/* remove subsequent block from the list; predecessor of new list also to be updated */
+			if (prev_ptr == list_start) {
+				if (*(SUCC(prev_ptr)) != NULL)
+					*(PRED(*(SUCC(prev_ptr)))) = NULL;
+				list_start = *(SUCC(prev_ptr));
+			} else {
+				removeBlockFromList(prev_ptr);
+			}
+			
+			/* move data to the start of the previous block, which would overwrite the current ptr hdr and prev ftr */
+			memmove(prev_ptr, ptr, copySize);
 
+			/* must be "coalesced" with previous before doing placement */
+			PUT(HDRP(prev_ptr), PACK(size_current+size_previous, GET_ALLOC_PREV(HDRP(prev_ptr)) + 1));
+			PUT(FTRP(prev_ptr), PACK(size_current+size_previous, GET_ALLOC_PREV(HDRP(prev_ptr)) + 1)); 
+			
+			place(prev_ptr, asize);
+			return prev_ptr;    	
+	    } 
 
+	}   
 
+    /* if all else fails, default to conventional allocation */
+    newptr = mm_malloc(size);
 
+     /* determine how much of the old block can be copied into the new */
+    if (size < copySize)
+      copySize = size;
 
-	CHECK("At exit of realloc.\n", verbose, NULL, NULL);
+  	/* copy the memory content once the block is allocated via newptr, free oldptr */
+  	memcpy(newptr, oldptr, copySize);
+  	mm_free(oldptr);
+
+  	CHECK("Default realloc of %p to new block %p \n", verbose, ptr, newptr);
+
+  	return newptr;
+
 }
+
+
 
 /* --------------- helper functions --------------- */
 
@@ -355,8 +390,8 @@ static void *extend_heap (size_t words)
 {
 	size_t size;
 	char *bp;
-	/* ADDON_1: status of block before epilogue */
-	int prev_alloc;
+	int prev_alloc; /* ADDON_1: status of block before epilogue */
+	void *next_ptr;
 
 	/* allocate even nr of words; mem_sbrk returns ptr at former epilogue */
 	size = (words % 2)? ((words+1) * WSIZE) : (words * WSIZE);
@@ -364,7 +399,8 @@ static void *extend_heap (size_t words)
 		return NULL;
 
 	/* ADDON_1: extract epilogue information before extension inserted */
-	prev_alloc = GET_ALLOC_PREV(HDRP(NEXT_BLKP(bp)));
+	next_ptr = NEXT_BLKP(bp);
+	prev_alloc = GET_ALLOC_PREV(HDRP(next_ptr));
 
 	/* prep the header, footer and epilogue header */
 	/* as the heap grows, the former epilogue block gets overwritten
@@ -374,101 +410,86 @@ static void *extend_heap (size_t words)
 	PUT(FTRP(bp), PACK(size, 0+prev_alloc));
 	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* epilogue's prev. not allocated */
 	
-	return coalesce(bp); /* coalesce if prev block free, set up pred/succ */
+	return coalesce(bp); /* coalesce if prev block free, must be done, because it sets up pred/succ */
 }
 
-/* Coalesce with neighboring blocks if they are free. 
- * * this fcn assumes that the current block, bp, is free,
- * * and that it has info on previous block alloc status
- * * It is also the workhorse which adds blocks to the 
- * * free list, and patches it when removing blocks.
- */
+/* Coalesce the free bp with free neighboring blocks if they are free. Maintain free list. */
 static void *coalesce(void *bp) 
 {
 	/* status of neighbor blocks, size of current */
 	/* ADDON_1: previous alloc status should always be checked at current block hdr */
-	// size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
 	size_t prev_alloc = GET_ALLOC_PREV(HDRP(bp)) / 2; // ==(2 / 2) if allocated
 	size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
 	size_t size = GET_SIZE(HDRP(bp));
-	int prev_prev_alloc;
+
+	/* newbp defines what is prepended to the list; target defines how to do it */
 	unsigned int *target;
+	void *newbp;
+	void *nextbp;
 
 	/* possible cases when coalescing with neighbors */
 	if (prev_alloc & next_alloc) { /* both allocated */
-		prependBlockToList(bp, list_start);
-		return bp;
-
+		newbp = bp;
+		target = list_start;
 	} else if (prev_alloc & (!next_alloc)) { /* coalesce with next*/
-		size+= GET_SIZE(HDRP(NEXT_BLKP(bp)));
+		newbp = bp;
+		nextbp = NEXT_BLKP(bp);
 
-		if ( NEXT_BLKP(bp) == list_start ) {
-			// save future target into variable here
+		size+= GET_SIZE(HDRP(nextbp));
+
+		if ( nextbp == list_start ) {
 			target = *SUCC(list_start);
 		} else {
 			target = (unsigned int *)list_start;
 		}
-
-		removeBlockFromList(NEXT_BLKP(bp));
+		removeBlockFromList(nextbp);
 
 		PUT(HDRP(bp), PACK(size, 0+2));
 		PUT(FTRP(bp), PACK(size, 0+2)); 
 
 	} else if ((!prev_alloc) & next_alloc) { /* coalesce with prev */
-		/* ADDON_1: obtain info on the second to previous block. Necessarily allocated? */
-		prev_prev_alloc = GET_ALLOC_PREV(HDRP(PREV_BLKP(bp)));
+		newbp = PREV_BLKP(bp);		
+		size+= GET_SIZE(FTRP(newbp));
 
-		if ( PREV_BLKP(bp) == list_start ) {
-			// store target into variable
+
+		if ( newbp == list_start ) {
 			target = *SUCC(list_start);
 		} else {
 			target = (unsigned int *)list_start;
 		}
+		removeBlockFromList(newbp);
 
-
-		/* if removal shifts what list_start is, can cause confusion downstream*/
-		/* solution to this might be saving list_start prior to removal */
-		removeBlockFromList(PREV_BLKP(bp));
-
-		size+= GET_SIZE(FTRP(PREV_BLKP(bp)));
-		PUT(HDRP(PREV_BLKP(bp)), PACK(size, prev_prev_alloc+0));
-		PUT(FTRP(bp), PACK(size, prev_prev_alloc+0));
-		bp = PREV_BLKP(bp);
+		PUT(HDRP(newbp), PACK(size, 2+0));
+		PUT(FTRP(bp), PACK(size, 2+0));
 
 	} else { /* coalesce with both */
-		/* ADDON_1: obtain info on the second to previous block. Necessarily allocated? */
-		prev_prev_alloc = GET_ALLOC_PREV(HDRP(PREV_BLKP(bp)));
+		newbp = PREV_BLKP(bp);		
+		nextbp = NEXT_BLKP(bp);
+		size+= GET_SIZE(FTRP(newbp)) + GET_SIZE(HDRP(nextbp));
 
-		/* maybe target to be saved before removal */
-		if ( (PREV_BLKP(bp) == list_start)) {
-			removeBlockFromList(NEXT_BLKP(bp));
-			// prev's succ already valid
+
+		if ((newbp == list_start)) {
+			removeBlockFromList(nextbp);
 			target = *SUCC(list_start);
 
-		} else if ( (NEXT_BLKP(bp) == list_start) ) {
-			removeBlockFromList(PREV_BLKP(bp));
+		} else if ( (nextbp == list_start) ) {
+			removeBlockFromList(newbp);
 			target = *SUCC(list_start);
 
 		} else {
-			removeBlockFromList(PREV_BLKP(bp));
-			removeBlockFromList(NEXT_BLKP(bp));
+			removeBlockFromList(newbp);
+			removeBlockFromList(nextbp);
 			target = (unsigned int *)list_start;
 		}
 
-		size+= GET_SIZE(FTRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
-		PUT(HDRP(PREV_BLKP(bp)), PACK(size, prev_prev_alloc+0));
-		PUT(FTRP(NEXT_BLKP(bp)), PACK(size, prev_prev_alloc+0));
-		bp = PREV_BLKP(bp);
+		PUT(HDRP(newbp), PACK(size, 2+0));
+		PUT(FTRP(nextbp), PACK(size, 2+0));
 	}
 
 	/* set up pointers in new free block; place it into linked list */
-	prependBlockToList(bp, target);
+	prependBlockToList(newbp, target);
 
-	/* ADDON_0: This code needed for next_fit() */
-	if ((rover > bp) && (rover < (void *)(NEXT_BLKP(bp))))
-		rover = (bp);
-
-	return bp;
+	return newbp;
 }
 
 /* placement helper 
@@ -478,61 +499,72 @@ static void *coalesce(void *bp)
  */
 static void place(void *bp, size_t asize) 
 {
-	size_t remainder = GET_SIZE(HDRP(bp)) - asize;
+	size_t size_current = GET_SIZE(HDRP(bp));
+	size_t remainder = size_current - asize;
+	size_t minimum_split = minblock; 	/* the split remainder minimum is the minimum block size */
 
-	/* if a remainder is to be split, it should be at least the minimum
-	 * block size defined by the design of the allocator. */
-	size_t minimum_split = minblock;
-
-	if ( remainder >= (minimum_split) ) { // split
-		/* shorten the allocated block; */
-		/* ADDON_1: get status of previous and put that in too */
-		PUT(HDRP(bp), PACK(asize, GET_ALLOC_PREV(HDRP(bp)) + 1));
-		/* ADDON_1: don't include ftr */
-		PUT(FTRP(bp), PACK(asize, GET_ALLOC_PREV(HDRP(bp)) + 1)); 
-
+	if ( remainder >= (minimum_split) ) { /* split */
 		/* block removal depends on where the block is */
 		if (bp == list_start) {
 			list_start = *(SUCC(bp));
 		} else {
 			removeBlockFromList(bp);
 		}
-		
-		/* cut remainder to leave a free block; previous is allocated (+2); can coalescing be done here? */
+
+		// CHECK("Realloc of size %d | inside place, before block macros \n", verbose, asize, NULL);
+
+		/* shorten the allocated block; */
+		/* ADDON_1: get status of previous and put that in too; ftr may be excluded */
+		PUT(HDRP(bp), PACK(asize, GET_ALLOC_PREV(HDRP(bp)) + 1));
+		PUT(FTRP(bp), PACK(asize, GET_ALLOC_PREV(HDRP(bp)) + 1)); 
+
+		/* cut remainder to leave a free block; previous is allocated (+2) */
 		bp = NEXT_BLKP(bp);
 		PUT(HDRP(bp), PACK(remainder, 0+2));
 		PUT(FTRP(bp), PACK(remainder, 0+2));
 
+		// CHECK("Realloc of size %d | inside place, after block macros \n", verbose, asize, NULL);
+
 		/* coalesce if possible, attach to list */
 		coalesce(bp);
 		
-	} else { // keep current block size
-		/* store status of current block */
-		/* ADDON_1: get status of previous as well. Necessarily allocated? Don't include ftr.*/
-		PUT(HDRP(bp), PACK(GET_SIZE(HDRP(bp)), GET_ALLOC_PREV(HDRP(bp)) + 1));
-		PUT(FTRP(bp), PACK(GET_SIZE(HDRP(bp)), 1)); 
-
-		/* ADDON_1: inform next block that current is allocated */
-		PUT(HDRP(NEXT_BLKP(bp)), PACK(GET_SIZE(HDRP(NEXT_BLKP(bp))), GET_ALLOC(HDRP(NEXT_BLKP(bp))) + 2));
-
-		/* block removal depends on where the block is*/
+	} else { /* keep current block size */
+		/* block removal depends on where the block is */
 		if (bp == list_start) {
 			list_start = *(SUCC(bp));
 		} else {
 			removeBlockFromList(bp);
 		}
 
+		/* store status of current block */
+		/* ADDON_1: get status of previous as well. Don't include ftr.*/
+		PUT(HDRP(bp), PACK(size_current, GET_ALLOC_PREV(HDRP(bp)) + 1));
+		PUT(FTRP(bp), PACK(size_current, 1)); 
+
+		/* ADDON_1: inform next block that current is allocated */
+		PUT(HDRP(NEXT_BLKP(bp)), PACK(GET_SIZE(HDRP(NEXT_BLKP(bp))), GET_ALLOC(HDRP(NEXT_BLKP(bp))) + 2));
 	}
+
 	return;
+}
+
+/* pad the requested block size */
+static size_t pad_size (size_t size)
+{
+    if (size <= (2*DSIZE)) {
+    	return minblock;
+    } else {
+    	/* round up to nearest 8, and add 4 for hdr; 8 if allocated block needs hdr+ftr */
+    	return (((size + DSIZE + (DSIZE - 1))/DSIZE) * DSIZE);
+    }
 }
 
 /* Fitment functions */
 
-/* first fit */
+/* first fit: fast, but suboptimal heap utilization */
 static void *first_fit(size_t asize) 
 {
 	void *bp = list_start; 
-
 	if (bp == NULL)
 		return NULL;
 
@@ -544,54 +576,69 @@ static void *first_fit(size_t asize)
 		
 		bp = *(SUCC(bp));
 	}
-
 	return NULL;
-
 }
 
 /* best fit; bad performance with implicit list; entire list must be scanned */ 
+/* unambiguously better utilization for all tests, but much worse throughput */
 static void *best_fit(size_t asize) 
 {
+	void *bp = list_start; 
+	void *candidate = NULL;
+	int candidates_found = 0;
+	int total_traversed = 0;
+	size_t size_current;
 
-	return NULL;
-}
+	if (list_start == NULL)
+		return NULL;
 
-/* next fit: performance almost identical to first_fit in implicit list.
- * start each search where the last stopped (rover), onwards till it wraps 
- * back to the beginning of the implicit list, and up to the rover. */
-static void *next_fit(size_t asize) 
-{
-	void *oldrover = rover;
-	
-	/* from rover to end of block list */
-	while (GET_SIZE(HDRP(rover))) {
-	
-		if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover)))) {
-			return rover;
+	/* look for the first candidate */
+	for (; bp != NULL; bp = *(SUCC(bp))) {
+		if ((asize <= GET_SIZE(HDRP(bp)))) {
+			candidate = bp;
+			candidates_found++;
+			bp = *(SUCC(bp));
+			break;
 		}
-		
-		rover = NEXT_BLKP(rover);
 	}
 
-	/* from start of block list to rover */
-	rover = (heap_listp);
-	while (/*GET_SIZE(HDRP(rover)) &&*/ (rover < oldrover)) {
+	if (candidate == NULL)
+		return NULL;
 
-		if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover)))) {
-			return rover;
+	if (bp == NULL)
+		return candidate;
+
+	/* traverse free list to find a better candidate than the first */
+	for (; bp != NULL; bp = *(SUCC(bp))) {
+		total_traversed++;
+		size_current = GET_SIZE(HDRP(bp));
+
+		if ((asize == size_current)) 
+			return bp;
+
+		if ((asize < size_current) && (size_current < GET_SIZE(HDRP(candidate)))) {
+			candidates_found++;
+			candidate = bp;
 		}
-		
-		rover = NEXT_BLKP(rover);
+
+		if (total_traversed  > 100)
+			return candidate;	
 	}
 
-	/* if not found */
-	return NULL;
+	/* */
+	if (candidates_found > 0) {
+		return candidate;
+	}
+	else {
+		return NULL;
+	}
 
 }
 
 
-
-/* Defrag routine: Coalesces if a block is unallocated. */
+/* Defrag routine: scan entire heap and coalesce adjacent free blocks.
+ * No need for deferred coalescing with a LIFO linked list + best fit; 
+ * throughput grading is 40/40 without it */
 static void defragment(void)
 {
 
@@ -606,15 +653,10 @@ static void defragment(void)
 
 }
 
-
 /* linked list helpers */
 
-/* insert a block at the start of the free list */
-/* the issue is that, when prepending a block into which adjacent
- * blocks were freed and coalesced, there is a chance that list_start
- * pointed either at the previous or the next block, thus meaning that 
- * it points somewhere inside the new block. 
- */
+/* prepend free block to free list; prepending target is resolved by caller to
+ * avoid edge cases and and pointers pointing inside of a coalesced free block */
 static void prependBlockToList(void *bp, unsigned int *target)
 {
 	/* ALWAYS: first node will have no predecessors since it is the start of the list */
@@ -633,61 +675,50 @@ static void prependBlockToList(void *bp, unsigned int *target)
 	return;
 }
 
-/* remove free block from linked list */
-/* Whichever adjacent free blocks are coalesced, they are disengaged from
- * the linked list and the list in that location should be re-knitted.
- * This may happen at either end of the LL; edge cases should avoid
- * de-referencing NULL ptrs. PRED/SUCC locations are themselves always valid, 
- * but may contain NULL ptrs at either end of the LL */ 
+/* remove free block from linked list; repair the free list there */
 static void removeBlockFromList(void *bp)
 {
-	/* if bp is the only block in LL, set list to empty */
-	if ((*(PRED(bp)) == NULL) && (*(SUCC(bp)) == NULL)) {
-		list_start = NULL;
+	void *predecessor = *(PRED(bp));
+	void *successor = *(SUCC(bp));
+
+	if (GET_ALLOC(HDRP(bp)))
 		return;
+
+	/* if bp is the only block in LL, set list to empty */
+	if (((predecessor) == NULL) && ((successor) == NULL)) {
+		list_start = NULL;
+		
+	} else {
+
+		/* predecessor to block should point at block's successor */
+		if ((predecessor) != NULL)
+			*(SUCC(predecessor)) = successor;
+
+		/* successor to block should point at block's predecessor*/
+		if ((successor) != NULL)
+			*(PRED(successor)) = predecessor;
 	}
 
-	/* predecessor to block should point at block's successor */
-	if (*(PRED(bp)) != NULL)
-		*(SUCC(*(PRED(bp)))) = *(SUCC(bp));
-
-	/* successor to block should point at block's predecessor*/
-	if (*(SUCC(bp)) != NULL)
-		*(PRED(*(SUCC(bp)))) = *(PRED(bp));
-
+	return;
 }
 
 
-/* heap checker
- * legal signature is "static int mm_check(void)"; 
- * verbose arg introduced for ease of debugging
- *
- * heap checker tasks:
- *
- * is every block in free list marked as free?
- * any contiguous free blocks that escaped coalescing?
- * is every free block actually in the free list?
- * do the pointers in the free list point to free blocks?
- * do the pointers in a heap block point to valid heap addresses?
-
- * do any allocated blocks overlap? mdriver tracks blocks via linked list,
- * where each node is constructed from a line (allocation request) in a 
- * trace file. given a known heap start, it can also track payloads and 
- * check if they overlap, as the driver calls mm_malloc and scans the LL 
- * struct nodes.
- */
+/* heap checker with routines for checking heap-structure and list-structure */
 static int mm_check(int verbose)
 {
 	int heapstatus = 0;
 	int liststatus = 0;
+	int status = 1;
 
 	if (verbose == 1) {printf("Heap start: %p; Heap end: %p\n", mem_heap_lo(), mem_heap_hi()); }
 
 	/* printout of current heap morphology */
+	/* checks if a free block is not in free list */
 	if ((heapstatus = checkheap(verbose)) > 1) {
 
 		printf("ERROR: Heap status is %d\n", heapstatus);
-		exit(0);
+		status+=heapstatus;
+		// exit(0);
 	}
 
 	if (verbose == 1) {printf("\n");}
@@ -696,23 +727,30 @@ static int mm_check(int verbose)
 	if ((liststatus = checklist(verbose)) > 1) {
 
 		printf("ERROR: List status is %d\n", liststatus);
-		exit(0);
+		status+=liststatus;
+		// exit(0);
 	}
 
 	if (verbose == 1) {printf("\n\n\n");}
 
-	/* all heap metrics OK */
-	return 1;
+	if (status > 1) {
+		printf("ERROR: Allocator status is %d\n", liststatus);
+		exit(0);
+	}
+
+	/* all heap metrics OK if status is 1 */
+	return status;
 }
 
+/* errstatus type 4 if heap/block structure related*/
 static int checkheap(int verbose)
 {
 	/* start from prologue block */
 	void *prologue = (void *)((char *)heap_listp );
 	void *bp;
-	int errstatus = 1;
+	int errstatus = 0;
 
-	if (verbose ==1) {
+	if (verbose == 1) {
 		printf("HEAP MORPHOLOGY\n");
 		printf("Prologue block: "); printblock(prologue); printf(" - - -\n");
 	}
@@ -722,31 +760,42 @@ static int checkheap(int verbose)
 		if (verbose == 1) 
 			printblock(bp);
 
-		if ((errstatus = checkblock(bp)) > 1)
-			return errstatus;
+		if ((errstatus = checkblock(bp)) > 1) {
+			printf("\n");
+		}
+
+		/* list related error */
+		if (!(GET_ALLOC(HDRP(bp))) && blockNotInList(bp)) {
+			printf("ERROR: Free block [%p] not in list. \n", bp);
+			errstatus=4;
+		}
 
 		/* check for uncoalesced adjacent free blocks here */
-
+		// degreeOfExternalFrag(startofheap);
 	}
+
 	if (verbose == 1) {
 		printf(" - - -\nEpilogue block: a: hdr[%d][%d] NO-FTR | addr: %p\n", GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), bp);
 	}
 
-	/* heap morphology OK*/
-	return 1; 	
-
+	/* heap morphology OK if returns 1 */
+	return errstatus; 	
 }
 
+/* errstatus contributions 128 and greater are list-related */
 static int checklist(int verbose)
 {
 	void *bp;
-	int errstatus = 1;
+	void *prev_bp = NULL;
+	int errstatus = 0;
+
+	/* circular linked list hare/tortoise detection */
+	void *hare = list_start;
+	void *tortoise = list_start;
 
 	if (verbose == 1) {
-		printf("FREE LIST\n");
-		printf("Free list head: %p\n - - - \n", list_start);		
+		printf("FREE LIST\nFree list head: %p\n - - - \n", list_start);		
 	}
-
 
 	/* empty list */
 	if (list_start == NULL) {
@@ -754,23 +803,45 @@ static int checklist(int verbose)
 		return 1;
 	}
 
+	if (*PRED(list_start) != NULL) {
+		printf("ERROR: list head has a predecessor. \n");
+		errstatus=4;
+	}
+
 	for (bp = list_start; (/*(*SUCC(bp))*/bp != NULL); bp = *(SUCC(bp)) ) {
 		
+		if (prev_bp && (*PRED(bp) != prev_bp)) {
+			printf("ERROR: current block [%p] does not point at previous [%p] as its predecessor. \n", bp, prev_bp);	
+			errstatus=4;	
+		}
+
 		if (verbose == 1)
 			printnode(bp);
 
 		if ((errstatus = checknode(bp)) > 1)
-			return errstatus;
+			printf("\n");
 
-		/* check for circular linked list here */
+		prev_bp = bp;
+
+		/* check for circular linked list here via hare/tortoise algorithm */
+		if ((hare == NULL) || (*SUCC(hare) == NULL)) { /* hare reached the end, list not circular.*/
+		} else {
+			tortoise = *SUCC(tortoise);
+			hare = *SUCC(*SUCC(hare)); /* also check if it runs out of heap bounds */
+			if (tortoise == hare) {
+				printf("ERROR: List is circular at[%p].\n", tortoise);
+				errstatus=4;
+				exit(0); /* to avoid running forever */
+			}
+		}
 
 	}
 
 	if (verbose == 1)
 		printf(" - - - \nList finished.\n\n\n\n");
 
-	/* list OK */
-	return 1;
+	/* at least 1 error if status greater than 1 */
+	return errstatus;
 }
 
 static void printblock(void *bp) 
@@ -778,10 +849,12 @@ static void printblock(void *bp)
 
 	if (GET_ALLOC(HDRP(bp))) {
 		/* format a/f: hdr[blk size, payload size] ftr[blk size, payload size]*/
-		printf("a: hdr[%d][%d] ftr[%d][%d] | addr: %p\n", GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
+		printf("a: hdr[%d][%d] ftr[%d][%d] | addr: %p\n", 
+			GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
 
 	} else {
-		printf("f: hdr[%d][%d] ftr[%d][%d] | addr: %p\n", GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
+		printf("f: hdr[%d][%d] ftr[%d][%d] | addr: %p\n", 
+			GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
 
 	}
 
@@ -790,19 +863,19 @@ static void printblock(void *bp)
 
 static int checkblock(void *bp)
 {
-	int status = 1;
+	int status = 0;
 
-	if (GET_ALLOC(HDRP(bp))) /* allocated blocks don't need to have hdr == ftr */
+	if (GET_ALLOC(HDRP(bp))) // allocated blocks don't need to have hdr == ftr if the ftr is eliminated for allocation 
 		return status;
 
 	if (!(GET_ALLOC(HDRP(bp)) == GET_ALLOC(FTRP(bp)))) {
 		printf("HDR alloc not match that of FTR.\n");
-		status+=2;
+		status=2;
 	}
 
 	if (!(GET_SIZE(HDRP(bp)) == GET_SIZE(FTRP(bp)))) {
 		printf("HDR size not match that of FTR.\n");
-		status+=4;
+		status=2;
 	}
 
 	return status;
@@ -813,27 +886,47 @@ static int checkblock(void *bp)
 
 static void printnode(void *bp)
 {
-	printf("f: hdr[%d][%d] pred[%p] succ[%p] ftr[%d][%d] | addr: %p\n", GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), *(PRED(bp)), *(SUCC(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
+	printf("f: hdr[%d][%d] pred[%p] succ[%p] ftr[%d][%d] | addr: %p\n", 
+		GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), *(PRED(bp)), *(SUCC(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
+	
 	return;
 }
 
 static int checknode(void *bp)
 {
-	int status = 1;
+	int status = 0;
 
 	/* does a block pointer point somewhere outside of the heap? */
 	if ((bp >= mem_heap_hi()) || (bp <= mem_heap_lo())) {
 		printf("Successor ptr is out of bounds: %p \n", bp); 
-		status+=2;
+		status=3;
 	}
 
 	/* does the free list contain allocated blocks? */
 	if (GET_ALLOC(HDRP(bp))) {
 		printf("Allocated block is in free list, %p \n", bp); 
-		status+=4;
+		status=3;
 	}
 
 	return status;
+}
+
+/*static int degreeOfExternalFrag(void* startofheap) 
+{
+
+}
+*/
+
+static int blockNotInList(void *ptr)
+{
+	void *bp;
+	for (bp = list_start; (/*(*SUCC(bp))*/bp != NULL); bp = *(SUCC(bp)) ) {
+		if (ptr == bp)
+			return 0;
+	}
+
+	/* block not found */
+	return 1;
 }
 
 

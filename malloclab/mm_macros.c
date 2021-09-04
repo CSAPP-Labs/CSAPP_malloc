@@ -5,7 +5,7 @@
 /* basic size definitions */
 #define WSIZE 4
 #define DSIZE 8
-#define CHUNKSIZE (1<<12)
+#define CHUNKSIZE (1<<8)
 
 #define MAX(x, y) ( ((x) > (y)) ? (x) : (y) )
 
@@ -50,5 +50,7 @@
 #define CHECK(msg, verbose, arg1, arg2) if (verbose == 1) {printf(msg, arg1, arg2);} mm_check(verbose)
 #define INTERRUPT(count, max) if (count > max) {exit(0);}
 #endif
+
+
 
 
