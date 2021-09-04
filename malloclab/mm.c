@@ -30,7 +30,7 @@
  * allocator implementation.
  *
  *
- * Description of implementation #1: implicit free list
+ * Implementation #1: implicit free list
  *
  * The allocator models the heap as an in-place list; at an arbitrary
  * moment of program execution, the list has an 8 byte prologue block with 
@@ -51,7 +51,7 @@
  * ADDON_1: modification to eliminate need for a footer in allocated blox.
  *
  *
- * Description of implementation #2: explicit free lists
+ * Implementation #2: explicit free lists
  * 
  * The design is implemented as a layer on top of the implicit free list design.
  * Block headers and footers are preserved for the purpose of overview of heap
@@ -67,6 +67,21 @@
  * but it breaks an assumption by the realloc function specifically at 1<<10, 
  * likely hitting some edge condition. Below 1<<9, util improves up to 53/60 but
  * throughput drops below 35/40.
+ * 
+ * Implementation #3: explicit free list, address-order
+ * 
+ * This design organizes the free list blocks in the order of their addreses, 
+ * making the free routine linear as it needs to find the appropriate location.
+ * The advantage should be that using first fit here should approach the 
+ * utilization of best-fit in a simple free list.
+ *
+ * Implementation #4 (not pursued): segregated free lists
+ *
+ * This design aims to reduce allocation time and freeing time to constant, with 
+ * its size classes. However, the design is prone to external and internal
+ * fragmentation.
+ *
+
  *
  */
 #include <stdio.h>
