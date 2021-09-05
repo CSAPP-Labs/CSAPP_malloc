@@ -5,7 +5,7 @@
 /* basic size definitions */
 #define WSIZE 4
 #define DSIZE 8
-#define CHUNKSIZE (1<<12)
+#define CHUNKSIZE (1<<8)
 
 #define MAX(x, y) ( ((x) > (y)) ? (x) : (y) )
 
@@ -37,8 +37,8 @@
 /* Explicit free list: linked list traversal helpers */
 
 /* this should be doable with the PUT macro */
-#define PRED(bp) ((unsigned int **)((char *)bp))
-#define SUCC(bp) ((unsigned int **)((char *)bp + DSIZE))
+#define PRED(bp) ((void **)((char *)bp))
+#define SUCC(bp) ((void **)((char *)bp + DSIZE))
 
 /* debugging helpers */
 // #define DEBUG

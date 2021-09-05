@@ -33,7 +33,7 @@ static int mm_check(int verbose)
 	if (verbose == 1) {printf("\n\n\n");}
 
 	if (status > 1) {
-		printf("ERROR: Allocator status is %d\n", liststatus);
+		printf("ERROR: Allocator status is %d\n", status);
 		exit(0);
 	}
 
@@ -70,6 +70,12 @@ static int checkheap(int verbose)
 		}
 
 		/* check for uncoalesced adjacent free blocks here */
+		if (!(GET_ALLOC(HDRP(bp))) && !(GET_ALLOC(HDRP(PREV_BLKP(bp))))) {
+			printf("ERROR: Free block [%p] not coalesced to its previous neighbour [%p]. \n", bp, PREV_BLKP(bp));
+			errstatus=4;
+		}
+
+
 		// degreeOfExternalFrag(startofheap);
 	}
 
@@ -107,18 +113,35 @@ static int checklist(int verbose)
 		errstatus=4;
 	}
 
-	for (bp = list_start; (/*(*SUCC(bp))*/bp != NULL); bp = *(SUCC(bp)) ) {
-		
+	for (bp = list_start; (bp != NULL); bp = *(SUCC(bp)) ) {
+
+		if (verbose == 1)
+			printnode(bp);
+
+		/* check correctness of double linking */
 		if (prev_bp && (*PRED(bp) != prev_bp)) {
 			printf("ERROR: current block [%p] does not point at previous [%p] as its predecessor. \n", bp, prev_bp);	
 			errstatus=4;	
 		}
 
-		if (verbose == 1)
-			printnode(bp);
-
 		if ((errstatus = checknode(bp)) > 1)
 			printf("\n");
+
+		/* check address ordering */
+		if (prev_bp) {
+
+			if (bp < prev_bp) {
+				printf("ERROR: current block address [%p] smaller than previous [%p] at request nr [%d]. \n", bp, prev_bp, request_count);	
+				errstatus=4;	
+				exit(0);			
+			}
+
+			if (bp == prev_bp) {
+				printf("ERROR: current block address [%p] equal to previous [%p]. \n", bp, prev_bp);	
+				errstatus=4;				
+			}
+
+		}
 
 		prev_bp = bp;
 
@@ -128,7 +151,7 @@ static int checklist(int verbose)
 			tortoise = *SUCC(tortoise);
 			hare = *SUCC(*SUCC(hare)); /* also check if it runs out of heap bounds */
 			if (tortoise == hare) {
-				printf("ERROR: List is circular at[%p].\n", tortoise);
+				printf("ERROR: List is circular at [%p].\n", tortoise);
 				errstatus=4;
 				exit(0); /* to avoid running forever */
 			}
@@ -227,8 +250,6 @@ static int blockNotInList(void *ptr)
 	/* block not found */
 	return 1;
 }
-
-
 
 
 

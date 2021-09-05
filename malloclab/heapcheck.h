@@ -12,8 +12,8 @@ static int request_count = -1;
 /* depends on trace file; this limit is to prematurely end mdriver tests and inspect 
  * where the allocation might have failed. if the entire trace should be run, then
  * the limit is ten times that of its requests, because mdriver runs each trace x10*/
-static int max_requests = 3000 * 10; 
-static int verbose = 1;
+static int max_requests = 6000 * 10; 
+static int verbose = 0;
 
 
 /* declare heap checker helpers */

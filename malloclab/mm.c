@@ -75,6 +75,10 @@
  * The advantage should be that using first fit here should approach the 
  * utilization of best-fit in a simple free list.
  *
+ * Performance with both first_fit() and best_fit() is 48/60 util and 12/40 thru.
+ * With a chunksize of 1<<8 and a full travesal of best_fit, utility is 52/60 and 
+ * thruput is 12/40.
+ *
  * Implementation #4 (not pursued): segregated free lists
  *
  * This design aims to reduce allocation time and freeing time to constant, with 
@@ -129,6 +133,8 @@ static size_t pad_size (size_t size);
 /* linked list helpers */
 static void prependBlockToList(void *bp, unsigned int *target);
 static void removeBlockFromList(void *bp);
+static void *scanForSuitablePredecessor(void *bp);
+static void insertBlockIntoList(void *predecessor, void *bp, void *successor);
 
 static int best_fit_traversal_limit = 100;
 
@@ -186,12 +192,13 @@ void *mm_malloc(size_t size)
     if ((bp = best_fit(asize)) != NULL) {
     	place(bp, asize);
 
-    	// CHECK("After allocation %d by fit fcn\n", verbose, request_count, NULL);
+    	CHECK("After allocation %d by fit fcn\n", verbose, request_count, NULL);
 
     	return bp;
     }
 
     /* defer coalescing to when allocation fails, then try allocating via fit again */
+    /* is it possible to defer coalescing if it also does list maintenance?*/
     /*
     defragment();
      if ((bp = first_fit(asize)) != NULL) {
@@ -206,11 +213,11 @@ void *mm_malloc(size_t size)
     	return NULL;
     }
 
-	// CHECK("After extension via extend_heap+coalesce, prior to placing.\n", verbose, NULL, NULL);
+	CHECK("After extension via extend_heap+coalesce, prior to placing.\n", verbose, NULL, NULL);
     
     place(bp, asize);
 
-	// CHECK("After allocation via extend_heap+coalescing, after placing.\n", verbose, NULL, NULL);
+	CHECK("After allocation via extend_heap+coalescing, after placing.\n", verbose, NULL, NULL);
 
     return bp;
 }
@@ -223,6 +230,7 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+	CHECK("Before freeing addr %p\n", verbose, ptr, NULL);
     /* mark hdr and ftr as free */
     size_t size = GET_SIZE(HDRP(ptr));
     int prev_alloc;
@@ -240,7 +248,7 @@ void mm_free(void *ptr)
 	/* coalescing does list insertion and pred/succ ptr setup, otherwise it would need to be done here */
 	coalesce(ptr);
 
-	// CHECK("After freeing addr %p\n", verbose, ptr, NULL);
+	CHECK("After freeing addr %p\n", verbose, ptr, NULL);
 }
 
 /*
@@ -286,6 +294,9 @@ void *mm_realloc(void *ptr, size_t size)
 	size_t size_previous;
 	size_t size_next;
 
+    copySize = (size_t)(GET_SIZE(HDRP(ptr)));
+    asize = pad_size(size);
+
 	/* generic case of NULL ptr */
     if (ptr == NULL)
     	return (mm_malloc(size));
@@ -297,14 +308,11 @@ void *mm_realloc(void *ptr, size_t size)
     }
 
     /* ptr not NULL; must have been returned by earlier call to mm_malloc(ptr). */
-    copySize = (size_t)(GET_SIZE(HDRP(ptr)));
-    asize = pad_size(size);
     if (copySize == asize)
     	return oldptr;
 
     /* Coalesce with neighbouring free block if the sum suffices for realloc */
     if (asize > copySize) {
-
     	prev_ptr = PREV_BLKP(ptr);
     	next_ptr = NEXT_BLKP(ptr);
 		size_current = GET_SIZE(HDRP(ptr));
@@ -314,12 +322,7 @@ void *mm_realloc(void *ptr, size_t size)
 	    /* expansion towards higher addresses is preferred */
 		if (!(GET_ALLOC(HDRP(next_ptr))) && ((size_current + size_next) >= asize)) {
 
-	    	/* remove subsequent block from the list */
-			if (next_ptr == list_start) {
-				list_start = *(SUCC(next_ptr));
-			} else {
-				removeBlockFromList(next_ptr);
-			}
+			removeBlockFromList(next_ptr);
 
 			/* join it to the current block */
 			PUT(HDRP(ptr), PACK((size_current+size_next), GET_ALLOC_PREV(HDRP(ptr)) + 1));
@@ -332,14 +335,7 @@ void *mm_realloc(void *ptr, size_t size)
 	    /* expansion backwards towards lower addresses involves memmove() */
 		if (!(GET_ALLOC(HDRP(prev_ptr))) && ((size_current+size_previous) >= asize)) {
 
-	    	/* remove subsequent block from the list; predecessor of new list also to be updated */
-			if (prev_ptr == list_start) {
-				if (*(SUCC(prev_ptr)) != NULL)
-					*(PRED(*(SUCC(prev_ptr)))) = NULL;
-				list_start = *(SUCC(prev_ptr));
-			} else {
-				removeBlockFromList(prev_ptr);
-			}
+			removeBlockFromList(prev_ptr);
 			
 			/* move data to the start of the previous block, which would overwrite the current ptr hdr and prev ftr */
 			memmove(prev_ptr, ptr, copySize);
@@ -353,6 +349,10 @@ void *mm_realloc(void *ptr, size_t size)
 	    } 
 
 	}   
+
+	/* cut existing block, free the remainder */
+	if (asize < copySize) {}
+
 
     /* if all else fails, default to conventional allocation */
     newptr = mm_malloc(size);
@@ -368,7 +368,6 @@ void *mm_realloc(void *ptr, size_t size)
   	CHECK("Default realloc of %p to new block %p \n", verbose, ptr, newptr);
 
   	return newptr;
-
 }
 
 
@@ -405,50 +404,58 @@ static void *extend_heap (size_t words)
 	return coalesce(bp); /* coalesce if prev block free, must be done, because it sets up pred/succ */
 }
 
-/* Coalesce the free bp with free neighboring blocks if they are free. Maintain free list. */
+/* Coalesce the *free* bp with free neighboring blocks. Maintain free list. */
 static void *coalesce(void *bp) 
 {
 	/* status of neighbor blocks, size of current */
-	/* ADDON_1: previous alloc status should always be checked at current block hdr */
 	size_t prev_alloc = GET_ALLOC_PREV(HDRP(bp)) / 2; // ==(2 / 2) if allocated
 	size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
 	size_t size = GET_SIZE(HDRP(bp));
 
-	/* newbp defines what is prepended to the list; target defines how to do it */
-	unsigned int *target;
+	/* newbp defines what is returned by coalesce */
 	void *newbp;
 	void *nextbp;
+
+	void *predecessor = NULL;
+	void *successor = NULL;
+
+  	// CHECK("Prior to coalesce logic; prev_alloc=%d; next_alloc=%d \n", verbose, prev_alloc, next_alloc);
 
 	/* possible cases when coalescing with neighbors */
 	if (prev_alloc & next_alloc) { /* both allocated */
 		newbp = bp;
-		target = list_start;
-	} else if (prev_alloc & (!next_alloc)) { /* coalesce with next*/
+
+		/* and set list_start to bp if that is verified, or let insertion do that? */
+		predecessor = scanForSuitablePredecessor(bp);
+
+		if (predecessor != NULL) {
+			successor = *SUCC(predecessor);
+		} else {
+			if (list_start != NULL)
+				successor = (list_start);
+		}
+
+
+	} else if (prev_alloc & (!next_alloc)) { /* coalesce with next */
 		newbp = bp;
 		nextbp = NEXT_BLKP(bp);
-
 		size+= GET_SIZE(HDRP(nextbp));
 
-		if ( nextbp == list_start ) {
-			target = *SUCC(list_start);
-		} else {
-			target = (unsigned int *)list_start;
-		}
+		successor = *SUCC(nextbp);
+		predecessor = *PRED(nextbp);
+
 		removeBlockFromList(nextbp);
 
-		PUT(HDRP(bp), PACK(size, 0+2));
-		PUT(FTRP(bp), PACK(size, 0+2)); 
+		PUT(HDRP(newbp), PACK(size, 0+2));
+		PUT(FTRP(newbp), PACK(size, 0+2)); 
 
 	} else if ((!prev_alloc) & next_alloc) { /* coalesce with prev */
 		newbp = PREV_BLKP(bp);		
 		size+= GET_SIZE(FTRP(newbp));
 
+		successor = *SUCC(newbp);
+		predecessor = *PRED(newbp);
 
-		if ( newbp == list_start ) {
-			target = *SUCC(list_start);
-		} else {
-			target = (unsigned int *)list_start;
-		}
 		removeBlockFromList(newbp);
 
 		PUT(HDRP(newbp), PACK(size, 2+0));
@@ -459,27 +466,32 @@ static void *coalesce(void *bp)
 		nextbp = NEXT_BLKP(bp);
 		size+= GET_SIZE(FTRP(newbp)) + GET_SIZE(HDRP(nextbp));
 
+		predecessor = *PRED(newbp);
+		successor = *SUCC(nextbp);
 
-		if ((newbp == list_start)) {
-			removeBlockFromList(nextbp);
-			target = *SUCC(list_start);
+		/* prev and next blk should have pointed at each other */
+/*		
+		if (*PRED(nextbp) != (newbp))
+			printf("Predecessor of the next block is not the previous block\n");
 
-		} else if ( (nextbp == list_start) ) {
-			removeBlockFromList(newbp);
-			target = *SUCC(list_start);
+		if (*SUCC(newbp) != (nextbp))
+			printf("Successor of the previous block is not the next block\n");
 
-		} else {
-			removeBlockFromList(newbp);
-			removeBlockFromList(nextbp);
-			target = (unsigned int *)list_start;
-		}
+*/
+		removeBlockFromList(newbp);
+		removeBlockFromList(nextbp);
 
 		PUT(HDRP(newbp), PACK(size, 2+0));
 		PUT(FTRP(nextbp), PACK(size, 2+0));
+
 	}
 
-	/* set up pointers in new free block; place it into linked list */
-	prependBlockToList(newbp, target);
+
+	/* insert into list, reknit the list, and determine if the start of the list has changed.
+	 * the start of the list is always the lowest address free block. */
+	insertBlockIntoList(predecessor, newbp, successor);
+
+
 
 	return newbp;
 }
@@ -496,12 +508,8 @@ static void place(void *bp, size_t asize)
 	size_t minimum_split = minblock; 	/* the split remainder minimum is the minimum block size */
 
 	if ( remainder >= (minimum_split) ) { /* split */
-		/* block removal depends on where the block is */
-		if (bp == list_start) {
-			list_start = *(SUCC(bp));
-		} else {
-			removeBlockFromList(bp);
-		}
+
+		removeBlockFromList(bp);
 
 		// CHECK("Realloc of size %d | inside place, before block macros \n", verbose, asize, NULL);
 
@@ -521,12 +529,8 @@ static void place(void *bp, size_t asize)
 		coalesce(bp);
 		
 	} else { /* keep current block size */
-		/* block removal depends on where the block is */
-		if (bp == list_start) {
-			list_start = *(SUCC(bp));
-		} else {
-			removeBlockFromList(bp);
-		}
+	
+		removeBlockFromList(bp);
 
 		/* store status of current block */
 		/* ADDON_1: get status of previous as well. Don't include ftr.*/
@@ -573,6 +577,11 @@ static void *first_fit(size_t asize)
 
 /* best fit; bad performance with implicit list; entire list must be scanned */ 
 /* unambiguously better utilization for all tests, but much worse throughput */
+/* best_fit can also maintain other milestones in the list; a list_end and 
+ * list_mid against which a bp can be checked; these may only be available 
+ * when the ENTIRE list is traversed, when NULL is hit. otherwise, both milestones
+ * would be set to NULL and scanForSuitablePredecessor would need to revert to
+ * its generic mode, from the start. */
 static void *best_fit(size_t asize) 
 {
 	void *bp = list_start; 
@@ -673,8 +682,21 @@ static void removeBlockFromList(void *bp)
 	void *predecessor = *(PRED(bp));
 	void *successor = *(SUCC(bp));
 
+	/* guard in case removal is called in a more general function 
+	 * which is used in another specific context */
 	if (GET_ALLOC(HDRP(bp)))
 		return;
+
+	/* decapitate list if bp is the start, and assign new list_start */
+	if (bp == list_start) {
+		list_start = successor;
+
+		if (list_start != NULL)
+			*PRED(list_start) = NULL;
+
+		return;
+	}
+
 
 	/* if bp is the only block in LL, set list to empty */
 	if (((predecessor) == NULL) && ((successor) == NULL)) {
@@ -692,6 +714,67 @@ static void removeBlockFromList(void *bp)
 	}
 
 	return;
+}
+
+
+
+static void *scanForSuitablePredecessor(void *bp)
+{
+	void *predecessor = list_start; 
+	void *successor_of_predecessor;
+
+	if (predecessor == NULL)
+		return NULL;
+
+	if (bp < list_start)
+		return NULL;
+
+	/* search routine traversing the linked list till end */
+	for ( ; predecessor != NULL; predecessor = *(SUCC(predecessor))) {
+
+		/* it should NOT be an equal address? */
+		if ((bp > predecessor)) {
+			successor_of_predecessor = *(SUCC(predecessor));
+
+
+			// if (*(SUCC(predecessor)) != NULL) {
+			// 	if (predecessor > *(SUCC(predecessor)) ) {
+			// 		printf("Predecessor is larger than its successor. SHOULD NOT HAPPEN in a well-ordered list\n");
+			// 	}
+			// }
+
+			/* this predecessor is only suited to the bp if its successor is larger
+			 * than the bp, or the successor is NULL */
+			if (((successor_of_predecessor) == NULL) || (bp < successor_of_predecessor))
+				return predecessor;
+			
+		}
+		
+	}
+	return NULL;	
+}
+
+
+static void insertBlockIntoList(void *predecessor, void *bp, void *successor)
+{
+
+	if (predecessor == NULL) {
+		list_start = bp;
+	}
+
+	/* set up pointers for the block being inserted */
+	*(PRED(bp)) = predecessor;
+	*(SUCC(bp)) = successor;
+
+	/* repair pointer of its successor */
+	if (successor != NULL)
+		*(PRED(successor)) = bp;
+
+
+	/* repair pointer of its predecessor */
+	if (predecessor != NULL)
+		*(SUCC(predecessor)) = bp;
+
 }
 
 
