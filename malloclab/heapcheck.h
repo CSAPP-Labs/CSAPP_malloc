@@ -2,7 +2,8 @@
 
 /* global variables for allocator design */
 static void *heap_listp; /* always points at prologue block of heap */
-static void *list_start; /* for explicit free list, linked list design */
+static void *list_start;
+static void *list_end; /* for explicit free list, linked list design */
 
 /* payload_size could be included in the header for overlap, and to track internal fragmentation*/
 static int minblock = 3*DSIZE; /* hdr + pred + succ + ftr (+ request_id + payload_size, for debugging) */

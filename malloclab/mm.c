@@ -21,8 +21,8 @@
  *
  * In order to achieve an acceptable balance of allocation throughput and 
  * heap utilization, several design issues are considered: 
- * free block organization, placement of payload into free block, coalescing
- * of free blocks, and splitting of a large-enough free block.
+ * free block organization, placement of payload into free block, 
+ * coalescing of free blocks, and splitting of a large-enough free block.
  *
  * Free block organization:
  * The list of free blocks is organized with a block-search methodology in
@@ -34,9 +34,9 @@
  *
  * The allocator models the heap as an in-place list; at an arbitrary
  * moment of program execution, the list has an 8 byte prologue block with 
- * only a header+footer, followed by a number of varying-size regular blocks
- * each with a header and footer, and ended by a 0-byte epilogue block 
- * consisting only of a header.
+ * only a header+footer, followed by a number of varying-size regular 
+ * blocks each with a header and footer, and ended by a 0-byte epilogue 
+ * block consisting only of a header.
  *
  * word = 4bytes; double = 8bytes; HDR=FTR=word; min blk size=4words=16bytes.
  * 
@@ -48,8 +48,8 @@
  *
  * ADDON_0: next_fit() thrown out for linked list designs.
  *
- * ADDON_1: modification to eliminate need for a footer in allocated blox.
- *
+ * ADDON_1: modification to eliminate need for a footer in allocated blox. 
+ * Ftr is retained in order to examine heap structure. 
  *
  * Implementation #2: explicit free lists
  * 
@@ -69,7 +69,7 @@
  * throughput drops below 35/40.
  * 
  * Implementation #3: explicit free list, address-order
- * 
+ *  
  * This design organizes the free list blocks in the order of their addreses, 
  * making the free routine linear as it needs to find the appropriate location.
  * The advantage should be that using first fit here should approach the 
@@ -79,13 +79,24 @@
  * With a chunksize of 1<<8 and a full travesal of best_fit, utility is 52/60 and 
  * thruput is 12/40.
  *
+ * An improvement on the routine which scans for the suitable insertion point 
+ * doubles the speed. util is 52/60 and thru is 26/40. An endpoint to the list
+ * is maintained and an approximation to its midpoint is guessed. If the block
+ * address seems to be closer to the list end, the scanning is done backwards. 
+ * This eliminates the temporal cost of scanning for insertion almost entirely,
+ * and utilization is preserved.
+ *
+ * Compiling w/o code profiling insertions (-pg flag) improves thruput to 31/40.
+ * Removing debugging symbol flags (-g, -O0) yields no improvement.
+ *
+ *
  * Implementation #4 (not pursued): segregated free lists
  *
- * This design aims to reduce allocation time and freeing time to constant, with 
- * its size classes. However, the design is prone to external and internal
- * fragmentation.
+ * This design aims to reduce allocation time and freeing time to constant, 
+ * with its size classes. However, the design is prone to external and internal
+ * fragmentation. Maybe fragmentation would be ameliorated by address-order 
+ * listing.
  *
-
  *
  */
 #include <stdio.h>
@@ -136,7 +147,7 @@ static void removeBlockFromList(void *bp);
 static void *scanForSuitablePredecessor(void *bp);
 static void insertBlockIntoList(void *predecessor, void *bp, void *successor);
 
-static int best_fit_traversal_limit = 100;
+static int best_fit_traversal_limit = 10000;
 
 
 /* mm_init - initialize the malloc package */
@@ -157,8 +168,9 @@ int mm_init(void)
 	/* Points at prologue, end of hdr start of ftr */
 	heap_listp+=(2*WSIZE); 
 
-	/* list of free blocks starts with dummy block, otherwise NULL */
+	/* list of free blocks empty */
 	list_start = NULL;
+	list_end = NULL;
 
 	/* extend heap with a free block of CHUNKSIZE, needs to be in free list */
 	if ( extend_heap(CHUNKSIZE/WSIZE) == NULL)
@@ -197,8 +209,7 @@ void *mm_malloc(size_t size)
     	return bp;
     }
 
-    /* defer coalescing to when allocation fails, then try allocating via fit again */
-    /* is it possible to defer coalescing if it also does list maintenance?*/
+    /* defer coalescing to when allocation fails, then try allocating via fit again */    
     /*
     defragment();
      if ((bp = first_fit(asize)) != NULL) {
@@ -212,8 +223,6 @@ void *mm_malloc(size_t size)
     if ((bp = extend_heap(extendedsize/WSIZE)) == NULL) {
     	return NULL;
     }
-
-	CHECK("After extension via extend_heap+coalesce, prior to placing.\n", verbose, NULL, NULL);
     
     place(bp, asize);
 
@@ -419,15 +428,11 @@ static void *coalesce(void *bp)
 	void *predecessor = NULL;
 	void *successor = NULL;
 
-  	// CHECK("Prior to coalesce logic; prev_alloc=%d; next_alloc=%d \n", verbose, prev_alloc, next_alloc);
-
 	/* possible cases when coalescing with neighbors */
 	if (prev_alloc & next_alloc) { /* both allocated */
 		newbp = bp;
 
-		/* and set list_start to bp if that is verified, or let insertion do that? */
 		predecessor = scanForSuitablePredecessor(bp);
-
 		if (predecessor != NULL) {
 			successor = *SUCC(predecessor);
 		} else {
@@ -469,15 +474,6 @@ static void *coalesce(void *bp)
 		predecessor = *PRED(newbp);
 		successor = *SUCC(nextbp);
 
-		/* prev and next blk should have pointed at each other */
-/*		
-		if (*PRED(nextbp) != (newbp))
-			printf("Predecessor of the next block is not the previous block\n");
-
-		if (*SUCC(newbp) != (nextbp))
-			printf("Successor of the previous block is not the next block\n");
-
-*/
 		removeBlockFromList(newbp);
 		removeBlockFromList(nextbp);
 
@@ -486,12 +482,8 @@ static void *coalesce(void *bp)
 
 	}
 
-
-	/* insert into list, reknit the list, and determine if the start of the list has changed.
-	 * the start of the list is always the lowest address free block. */
+	/* insert into list, reknit the list, determine if list_start changed */
 	insertBlockIntoList(predecessor, newbp, successor);
-
-
 
 	return newbp;
 }
@@ -508,13 +500,10 @@ static void place(void *bp, size_t asize)
 	size_t minimum_split = minblock; 	/* the split remainder minimum is the minimum block size */
 
 	if ( remainder >= (minimum_split) ) { /* split */
-
 		removeBlockFromList(bp);
 
-		// CHECK("Realloc of size %d | inside place, before block macros \n", verbose, asize, NULL);
-
 		/* shorten the allocated block; */
-		/* ADDON_1: get status of previous and put that in too; ftr may be excluded */
+		/* get status of previous and put that in too; ftr may be excluded */
 		PUT(HDRP(bp), PACK(asize, GET_ALLOC_PREV(HDRP(bp)) + 1));
 		PUT(FTRP(bp), PACK(asize, GET_ALLOC_PREV(HDRP(bp)) + 1)); 
 
@@ -523,21 +512,17 @@ static void place(void *bp, size_t asize)
 		PUT(HDRP(bp), PACK(remainder, 0+2));
 		PUT(FTRP(bp), PACK(remainder, 0+2));
 
-		// CHECK("Realloc of size %d | inside place, after block macros \n", verbose, asize, NULL);
-
 		/* coalesce if possible, attach to list */
 		coalesce(bp);
 		
 	} else { /* keep current block size */
-	
 		removeBlockFromList(bp);
 
 		/* store status of current block */
-		/* ADDON_1: get status of previous as well. Don't include ftr.*/
 		PUT(HDRP(bp), PACK(size_current, GET_ALLOC_PREV(HDRP(bp)) + 1));
 		PUT(FTRP(bp), PACK(size_current, 1)); 
 
-		/* ADDON_1: inform next block that current is allocated */
+		/* inform next block that current is allocated */
 		PUT(HDRP(NEXT_BLKP(bp)), PACK(GET_SIZE(HDRP(NEXT_BLKP(bp))), GET_ALLOC(HDRP(NEXT_BLKP(bp))) + 2));
 	}
 
@@ -575,8 +560,7 @@ static void *first_fit(size_t asize)
 	return NULL;
 }
 
-/* best fit; bad performance with implicit list; entire list must be scanned */ 
-/* unambiguously better utilization for all tests, but much worse throughput */
+/* best fit; better utilization for all tests, but much worse throughput */
 /* best_fit can also maintain other milestones in the list; a list_end and 
  * list_mid against which a bp can be checked; these may only be available 
  * when the ENTIRE list is traversed, when NULL is hit. otherwise, both milestones
@@ -586,21 +570,16 @@ static void *best_fit(size_t asize)
 {
 	void *bp = list_start; 
 	void *candidate = NULL;
-	int candidates_found = 0;
-	int total_traversed = 0;
+	// int candidates_found = 0;
+	// int total_traversed = 0;
 	size_t size_current;
 
 	if (list_start == NULL)
 		return NULL;
 
 	/* look for the first candidate */
-	for (; bp != NULL; bp = *(SUCC(bp))) {
-		if ((asize <= GET_SIZE(HDRP(bp)))) {
-			candidate = bp;
-			candidates_found++;
-			bp = *(SUCC(bp));
-			break;
-		}
+	if ((candidate = first_fit(asize)) != NULL) {
+		bp = *(SUCC(candidate));
 	}
 
 	if (candidate == NULL)
@@ -611,28 +590,21 @@ static void *best_fit(size_t asize)
 
 	/* traverse free list to find a better candidate than the first */
 	for (; bp != NULL; bp = *(SUCC(bp))) {
-		total_traversed++;
+		// total_traversed++;
 		size_current = GET_SIZE(HDRP(bp));
 
 		if ((asize == size_current)) 
 			return bp;
 
 		if ((asize < size_current) && (size_current < GET_SIZE(HDRP(candidate)))) {
-			candidates_found++;
 			candidate = bp;
 		}
 
-		if (total_traversed  > best_fit_traversal_limit)
-			return candidate;	
+		// if (total_traversed  > best_fit_traversal_limit)
+		// 	return candidate;	
 	}
 
-	/* */
-	if (candidates_found > 0) {
-		return candidate;
-	}
-	else {
-		return NULL;
-	}
+	return candidate;
 
 }
 
@@ -687,6 +659,10 @@ static void removeBlockFromList(void *bp)
 	if (GET_ALLOC(HDRP(bp)))
 		return;
 
+	/* set list_end*/
+	if (successor == NULL)
+		list_end = predecessor;
+
 	/* decapitate list if bp is the start, and assign new list_start */
 	if (bp == list_start) {
 		list_start = successor;
@@ -729,22 +705,33 @@ static void *scanForSuitablePredecessor(void *bp)
 	if (bp < list_start)
 		return NULL;
 
-	/* search routine traversing the linked list till end */
+	/* midpoint of list assumed between start and end; if bp is larger than that, 
+	 * then scan for the appropriate insertion point from end to start. */
+	if ((list_end != NULL) && (list_end != list_start) && ( (void *)(( ((unsigned long)list_start + (unsigned long)list_end) )>>1) < bp )) {
+
+		/* search routine traversing the linked list till start */
+		for (predecessor = list_end; predecessor != NULL; predecessor = *(PRED(predecessor))) {
+
+			/* it should NOT be an equal address? */
+			if ((bp > predecessor)) {
+				successor_of_predecessor = *(SUCC(predecessor));
+				/* next block must be at a larger address than the bp, or NULL */
+				if (((successor_of_predecessor) == NULL) || (bp < successor_of_predecessor))
+					return predecessor;
+			}
+			
+		}
+		return NULL;
+	}
+
+	/* search routine traversing the linked list from start till end */
 	for ( ; predecessor != NULL; predecessor = *(SUCC(predecessor))) {
 
 		/* it should NOT be an equal address? */
 		if ((bp > predecessor)) {
 			successor_of_predecessor = *(SUCC(predecessor));
 
-
-			// if (*(SUCC(predecessor)) != NULL) {
-			// 	if (predecessor > *(SUCC(predecessor)) ) {
-			// 		printf("Predecessor is larger than its successor. SHOULD NOT HAPPEN in a well-ordered list\n");
-			// 	}
-			// }
-
-			/* this predecessor is only suited to the bp if its successor is larger
-			 * than the bp, or the successor is NULL */
+			/* next block must be at a larger address than the bp, or NULL */
 			if (((successor_of_predecessor) == NULL) || (bp < successor_of_predecessor))
 				return predecessor;
 			
@@ -760,6 +747,10 @@ static void insertBlockIntoList(void *predecessor, void *bp, void *successor)
 
 	if (predecessor == NULL) {
 		list_start = bp;
+	}
+
+	if (successor == NULL) {
+		list_end = bp;
 	}
 
 	/* set up pointers for the block being inserted */

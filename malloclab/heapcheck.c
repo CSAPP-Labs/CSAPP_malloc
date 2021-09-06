@@ -75,7 +75,6 @@ static int checkheap(int verbose)
 			errstatus=4;
 		}
 
-
 		// degreeOfExternalFrag(startofheap);
 	}
 
