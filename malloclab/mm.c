@@ -656,7 +656,8 @@ static void *last_fit(size_t asize)
 	return NULL;
 
 }
-
+/* same principle as best fit, but from end to start of list. 
+ * same performance as best fit */
 static void *rev_best_fit(size_t asize) 
 {
 	void *bp = list_end; 
