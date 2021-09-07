@@ -89,6 +89,14 @@
  * Compiling w/o code profiling insertions (-pg flag) improves thruput to 31/40.
  * Removing debugging symbol flags (-g, -O0) yields no improvement.
  *
+ * The thru bottleneck is now the fitment fcn. The util and thru issues with the 
+ * binary allocation tests remain; for binary2-bal.rep it seems that the free 
+ * list undergoes some kind of thrashing when repeatedly allocating and freeing
+ * similar sizes.
+ *
+ * Using last_fit algorithm, util is 48/60 and thruput 40/40, when code prof is
+ * turned off
+ *
  *
  * Implementation #4 (not pursued): segregated free lists
  *
@@ -138,6 +146,9 @@ static void defragment(void);
 
 static void *first_fit(size_t asize);
 static void *best_fit(size_t asize);
+static void *last_fit(size_t asize);
+static void *rev_best_fit(size_t asize);
+
 
 static size_t pad_size (size_t size);
 
@@ -198,13 +209,13 @@ void *mm_malloc(size_t size)
 
     /* debugging macros only execute if DEBUG is defined */
     INTERRUPT(request_count, max_requests);
-	CHECK("Before allocation nr %d of size [%d]\n", verbose, request_count, asize);
+	// CHECK("Before allocation nr %d of size [%d]\n", verbose, request_count, asize);
 
     /* search for suitable block via some fit method, and allocate */
-    if ((bp = best_fit(asize)) != NULL) {
+    if ((bp = last_fit(asize)) != NULL) {
     	place(bp, asize);
 
-    	CHECK("After allocation %d by fit fcn\n", verbose, request_count, NULL);
+    	// CHECK("After allocation %d by fit fcn\n", verbose, request_count, NULL);
 
     	return bp;
     }
@@ -226,7 +237,7 @@ void *mm_malloc(size_t size)
     
     place(bp, asize);
 
-	CHECK("After allocation via extend_heap+coalescing, after placing.\n", verbose, NULL, NULL);
+	// CHECK("After allocation via extend_heap+coalescing, after placing.\n", verbose, NULL, NULL);
 
     return bp;
 }
@@ -239,25 +250,32 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-	CHECK("Before freeing addr %p\n", verbose, ptr, NULL);
+	
     /* mark hdr and ftr as free */
     size_t size = GET_SIZE(HDRP(ptr));
     int prev_alloc;
 
     /* ADDON_1: get status of previous block */
     prev_alloc = GET_ALLOC_PREV(HDRP(ptr));
+    // prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(ptr)));
+
+    CHECK("Before freeing addr %p; its prev neighbour status is %d.\n", verbose, ptr, prev_alloc);
+
 
     /* mark block as free */
 	PUT(HDRP(ptr), PACK(size, 0+prev_alloc));
 	PUT(FTRP(ptr), PACK(size, 0+prev_alloc));
 
 	/* ADDON_1: inform next block that the current one is free */
-	PUT(HDRP(NEXT_BLKP(ptr)), PACK(GET_SIZE(HDRP(NEXT_BLKP(ptr))), GET_ALLOC(HDRP(NEXT_BLKP(ptr)))));
+	PUT(HDRP(NEXT_BLKP(ptr)), PACK(GET_SIZE(HDRP(NEXT_BLKP(ptr))), ( GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) ) );
+
 
 	/* coalescing does list insertion and pred/succ ptr setup, otherwise it would need to be done here */
 	coalesce(ptr);
 
-	CHECK("After freeing addr %p\n", verbose, ptr, NULL);
+	prev_alloc = GET_ALLOC_PREV(HDRP(ptr));
+
+	CHECK("After freeing addr %p; its prev neighbour status is %d.\n", verbose, ptr, prev_alloc);
 }
 
 /*
@@ -272,7 +290,7 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-	CHECK("At entry of realloc.\n", verbose, NULL, NULL);
+	// CHECK("At entry of realloc.\n", verbose, NULL, NULL);
 
 	/* basic implementation of realloc */
 /*
@@ -307,7 +325,7 @@ void *mm_realloc(void *ptr, size_t size)
     asize = pad_size(size);
 
 	/* generic case of NULL ptr */
-    if (ptr == NULL)
+    if (ptr == NULL) 
     	return (mm_malloc(size));
 
     /* generic case of size == 0 */
@@ -330,6 +348,7 @@ void *mm_realloc(void *ptr, size_t size)
 
 	    /* expansion towards higher addresses is preferred */
 		if (!(GET_ALLOC(HDRP(next_ptr))) && ((size_current + size_next) >= asize)) {
+			CHECK("Expansion towards higher addresses.\n", verbose, NULL, NULL);
 
 			removeBlockFromList(next_ptr);
 
@@ -337,12 +356,17 @@ void *mm_realloc(void *ptr, size_t size)
 			PUT(HDRP(ptr), PACK((size_current+size_next), GET_ALLOC_PREV(HDRP(ptr)) + 1));
 			PUT(FTRP(ptr), PACK((size_current+size_next), GET_ALLOC_PREV(HDRP(ptr)) + 1)); 
 
+			/* inform the next block that the current is allocated .. shouldnt place do that? */
+			PUT(HDRP(NEXT_BLKP(ptr)), PACK(GET_SIZE(HDRP(NEXT_BLKP(ptr))), ( GET_ALLOC(HDRP(NEXT_BLKP(ptr))) + 2 ) ) );
+
+
 			place(oldptr, asize);
 			return oldptr;    	
 	    } 
 
 	    /* expansion backwards towards lower addresses involves memmove() */
 		if (!(GET_ALLOC(HDRP(prev_ptr))) && ((size_current+size_previous) >= asize)) {
+			// CHECK("Expansion towards lower addresses.\n", verbose, NULL, NULL);
 
 			removeBlockFromList(prev_ptr);
 			
@@ -354,6 +378,8 @@ void *mm_realloc(void *ptr, size_t size)
 			PUT(FTRP(prev_ptr), PACK(size_current+size_previous, GET_ALLOC_PREV(HDRP(prev_ptr)) + 1)); 
 			
 			place(prev_ptr, asize);
+			CHECK("Expansion towards lower addresses, after tasks.\n", verbose, NULL, NULL); 
+
 			return prev_ptr;    	
 	    } 
 
@@ -362,9 +388,10 @@ void *mm_realloc(void *ptr, size_t size)
 	/* cut existing block, free the remainder */
 	if (asize < copySize) {}
 
-
     /* if all else fails, default to conventional allocation */
     newptr = mm_malloc(size);
+    place(newptr, asize);
+
 
      /* determine how much of the old block can be copied into the new */
     if (size < copySize)
@@ -374,7 +401,7 @@ void *mm_realloc(void *ptr, size_t size)
   	memcpy(newptr, oldptr, copySize);
   	mm_free(oldptr);
 
-  	CHECK("Default realloc of %p to new block %p \n", verbose, ptr, newptr);
+  	// CHECK("Default realloc of %p to new block %p \n", verbose, ptr, newptr);
 
   	return newptr;
 }
@@ -512,6 +539,9 @@ static void place(void *bp, size_t asize)
 		PUT(HDRP(bp), PACK(remainder, 0+2));
 		PUT(FTRP(bp), PACK(remainder, 0+2));
 
+		/*  inform the block after, that the cut portion is unallocated */
+		PUT(HDRP(NEXT_BLKP(bp)), PACK(GET_SIZE(HDRP(NEXT_BLKP(bp))), GET_ALLOC(HDRP(NEXT_BLKP(bp))) ) );
+
 		/* coalesce if possible, attach to list */
 		coalesce(bp);
 		
@@ -520,7 +550,7 @@ static void place(void *bp, size_t asize)
 
 		/* store status of current block */
 		PUT(HDRP(bp), PACK(size_current, GET_ALLOC_PREV(HDRP(bp)) + 1));
-		PUT(FTRP(bp), PACK(size_current, 1)); 
+		PUT(FTRP(bp), PACK(size_current, GET_ALLOC_PREV(HDRP(bp)) + 1)); 
 
 		/* inform next block that current is allocated */
 		PUT(HDRP(NEXT_BLKP(bp)), PACK(GET_SIZE(HDRP(NEXT_BLKP(bp))), GET_ALLOC(HDRP(NEXT_BLKP(bp))) + 2));
@@ -607,6 +637,70 @@ static void *best_fit(size_t asize)
 	return candidate;
 
 }
+
+static void *last_fit(size_t asize)
+{
+
+	void *bp = list_end; 
+	if (bp == NULL)
+		return NULL;
+
+	/* search routine traversing the linked list till end */
+	while (bp != NULL ) {
+
+		if ((asize <= GET_SIZE(HDRP(bp)))) 
+			return bp;
+		
+		bp = *(PRED(bp));
+	}
+	return NULL;
+
+}
+
+static void *rev_best_fit(size_t asize) 
+{
+	void *bp = list_end; 
+	void *candidate = NULL;
+	// int candidates_found = 0;
+	// int total_traversed = 0;
+	size_t size_current;
+
+	if (list_start == NULL)
+		return NULL;
+
+	/* look for the first candidate */
+	if ((candidate = last_fit(asize)) != NULL) {
+		bp = *(PRED(candidate));
+	}
+
+	if (candidate == NULL)
+		return NULL;
+
+	if (bp == NULL)
+		return candidate;
+
+	/* traverse free list to find a better candidate than the first */
+	for (; bp != NULL; bp = *(PRED(bp))) {
+		// total_traversed++;
+		size_current = GET_SIZE(HDRP(bp));
+
+		if ((asize == size_current)) 
+			return bp;
+
+		if ((asize < size_current) && (size_current < GET_SIZE(HDRP(candidate)))) {
+			candidate = bp;
+		}
+
+		// if (total_traversed  > best_fit_traversal_limit)
+		// 	return candidate;	
+	}
+
+	return candidate;
+
+}
+
+
+// static void next_fit(size_t asize)
 
 
 /* Defrag routine: scan entire heap and coalesce adjacent free blocks.

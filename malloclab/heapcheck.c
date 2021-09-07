@@ -34,7 +34,7 @@ static int mm_check(int verbose)
 
 	if (status > 1) {
 		printf("ERROR: Allocator status is %d\n", status);
-		exit(0);
+		// exit(0);
 	}
 
 	/* all heap metrics OK if status is 1 */
@@ -73,6 +73,7 @@ static int checkheap(int verbose)
 		if (!(GET_ALLOC(HDRP(bp))) && !(GET_ALLOC(HDRP(PREV_BLKP(bp))))) {
 			printf("ERROR: Free block [%p] not coalesced to its previous neighbour [%p]. \n", bp, PREV_BLKP(bp));
 			errstatus=4;
+			exit(0);
 		}
 
 		// degreeOfExternalFrag(startofheap);
@@ -132,7 +133,7 @@ static int checklist(int verbose)
 			if (bp < prev_bp) {
 				printf("ERROR: current block address [%p] smaller than previous [%p] at request nr [%d]. \n", bp, prev_bp, request_count);	
 				errstatus=4;	
-				exit(0);			
+				// exit(0);			
 			}
 
 			if (bp == prev_bp) {
@@ -152,7 +153,7 @@ static int checklist(int verbose)
 			if (tortoise == hare) {
 				printf("ERROR: List is circular at [%p].\n", tortoise);
 				errstatus=4;
-				exit(0); /* to avoid running forever */
+				// exit(0); /* to avoid running forever */
 			}
 		}
 
@@ -170,12 +171,12 @@ static void printblock(void *bp)
 
 	if (GET_ALLOC(HDRP(bp))) {
 		/* format a/f: hdr[blk size, payload size] ftr[blk size, payload size]*/
-		printf("a: hdr[%d][%d] ftr[%d][%d] | addr: %p\n", 
-			GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
+		printf("a: hdr[%d][%d][prev:%d] ftr[%d][%d] | addr: %p\n", 
+			GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_ALLOC_PREV(HDRP((bp))), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
 
 	} else {
-		printf("f: hdr[%d][%d] ftr[%d][%d] | addr: %p\n", 
-			GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
+		printf("f: hdr[%d][%d][prev:%d] ftr[%d][%d] | addr: %p\n", 
+			GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), GET_ALLOC_PREV(HDRP((bp))), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)), bp);
 
 	}
 
