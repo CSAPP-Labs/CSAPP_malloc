@@ -1,8 +1,0 @@
-define cx
-	set $start = $arg0
-	set $end = $arg1
-	while ($start <= $end)
-		x/gx $start
-		set $start = $start + 8
-	end
-end

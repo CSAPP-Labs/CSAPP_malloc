@@ -1,7 +1,0 @@
-break main
-break exit
-break explode_bomb
-break phase_defused
-break secret_phase
-break phase_4
-break func4
